@@ -220,15 +220,14 @@ What Link is wearing and holding right now (read only).
 
 ### 2.8 Save manager
 
-Saves kept on the SD card in `sloperinaGZ/savestates/<category>/<name>/`, copied over your **manual save** (the
-game's first save slot, the top one on the load screen). Nothing changes in the running game until you load it.
+Saves kept on the SD card in `sloperinaGZ/savestates/<category>/<name>/`, copied over your **manual save** (the save slot on the game’s load screen without the "Autosave" label). Nothing changes in the running game until you load it.
 Save once in the game first (or go through a loading zone): that is how sloperinaGZ finds the game's save folder.
 
 | Item | What it does |
 |---|---|
 | **category** | D-pad left / right: which folder of saves to show. |
 | **page** | D-pad left / right: the next page, when the category has more saves than fit. |
-| *each save* | **L** replaces your manual save with it. Then load the first save on the game's load screen. |
+| *each save* | **L** replaces your manual save with it. Then load the save slot without the "Autosave" label on the game’s load screen. |
 | **force save (experimental)** | Names it on the keyboard, then stores the game as it is now. Not foolproof; doesn't work during a cutscene or a boss fight. |
 | **store manual save** | Names it on the keyboard, then stores your manual save as the game last saved it. |
 | **refresh list** | Reads the saves folder again after you add, rename or delete saves. |
