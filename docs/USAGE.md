@@ -125,6 +125,13 @@ the next frame.
 **...see my inputs on screen?**
 **settings > input display > show**. Choose **style: controller** for a picture of a Pro Controller, or **style: minimal** for a short line of button outlines that takes less of the screen.
 
+**...go back to a spot I saved?**
+**save manager**: pick the **category** (D-pad left / right) and press **L** on a save. It replaces your manual save.
+Close the menu and load the first save on the game's load screen.
+
+**...keep my current spot?**
+Save in the game, then **save manager > store manual save** and give it a name.
+
 **...make the menu smaller?**
 **settings > size**: small, medium or large.
 
@@ -143,7 +150,8 @@ the next frame.
 
 Everything you change in **settings**, **cheats** and **watches** (and the watches box position) is saved by
 itself a couple of seconds after you close the menu, and comes back next time you start the game. It's kept on
-the SD card in `sloperinaGZ/settings.ini`, plain text you can edit. Your game saves are never touched.
+the SD card in `sloperinaGZ/settings.ini`, plain text you can edit. Your game saves are only touched when you pick a save
+in the [save manager](MANUAL.md#28-save-manager).
 
 ## Something's not right
 
@@ -152,6 +160,7 @@ the SD card in `sloperinaGZ/settings.ini`, plain text you can edit. Your game sa
 - **The game doesn't react to a button.** Frame advance takes **L** (or **R**) away from the game while it's on
   (except in the game's pause screen, unless **settings > frame advance > in pause screen** is on),
   levitate takes **L3**, plus **X/B/R3** while floating. Turn them off in **settings** if you need those buttons.
+- **The save manager says to save once in the game first.** Save once (or go through a loading zone) and try again.
 - **The screen froze.** Frame advance may have paused the game: press **L + L3** (or **R + L3**).
 - **Something I ticked didn't change in the game.** Some things only show after the game redraws them: open and
   close the pause screen, or go through a loading zone. Story stages apply after a loading zone.

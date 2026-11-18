@@ -16,7 +16,7 @@ static bool shift;
 static void (*on_done)(const char *, intptr_t);
 static intptr_t done_ctx;
 
-static const char *const key_rows[] = { "1234567890", "qwertyuiop", "asdfghjkl-", "zxcvbnm,." };
+static const char *const key_rows[] = { "1234567890", "qwertyuiop", "asdfghjkl-", "zxcvbnm,.'" };
 #define N_KEY_ROWS 4
 /* the last row: commands instead of characters */
 enum { CMD_SHIFT, CMD_SPACE, CMD_BACK, CMD_DELETE, CMD_OK, N_COMMANDS };

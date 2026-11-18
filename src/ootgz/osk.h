@@ -6,7 +6,7 @@
 
 #include "menu.h"
 
-#define OSK_MAX 12 /* characters */
+#define OSK_MAX 32 /* characters (watch labels keep their own, shorter limit) */
 
 /* Open the keyboard over the current menu with `initial` in it. When it's finished (L on the text,
  * or "ok"), done(text, ctx) is called and the menu goes back; return / R + d-left cancels. */

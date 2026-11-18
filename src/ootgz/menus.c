@@ -3497,6 +3497,7 @@ static void build_about(void)
   menu_add_return(&m_about);
 }
 
+static menu_t m_states; /* save manager, built below */
 static void build_root(void)
 {
   menu_init(&menu_root, "sloperinaGZ", 14);
@@ -3507,12 +3508,145 @@ static void build_root(void)
   menu_add_submenu(&menu_root, "inventory", &m_inventory);
   menu_add_submenu(&menu_root, "equips", &m_equips);
   menu_add_submenu(&menu_root, "story", &m_story);
+  menu_add_submenu(&menu_root, "save manager", &m_states);
   menu_add_submenu(&menu_root, "watches", &m_watches);
   menu_add_submenu(&menu_root, "debug", &m_debug);
   menu_add_submenu(&menu_root, "settings", &m_settings);
   menu_add_submenu(&menu_root, "log", &m_log);
   menu_add_submenu(&menu_root, "about", &m_about);
   menu_add(&menu_root, MI_BACK, "close");
+}
+
+/* savestates (savebackup.h): saves kept on the SD card, by category, copied into slot 01 of the game's save folder (the manual save).
+ * The menu is laid out to show everything without scrolling: a category and a page row, the page's saves, the three
+ * tools, return, a status line and a hint (up to 3 rows). The saves' page is as long as the screen allows. */
+static int states_built = -1;
+/* the rows that aren't saves: category, page, the three tools and return (6), the title and its gap (2), the gap
+ * above the hint (1), the hint (3), the status line and its gap (2) */
+#define STATES_ROWS_AROUND 14
+
+static void act_state_apply(menu_item_t *it)
+{
+  const char *err = savestates_apply((int)it->data);
+  log_printf("save manager: %s", savestates_result());
+  gfx_notice(err ? "couldn't load it: see the line under the list" : "manual save replaced: now load it");
+}
+
+/* the keyboard's answer: the manual save (slot 01) is saved under that name (empty: save_NNN) */
+static void state_named(const char *name, intptr_t ctx)
+{
+  const char *err = savestates_dump(name, ctx != 0);
+  log_printf("save manager: %s", savestates_result());
+  gfx_notice(err ? "couldn't store it: see the line under the list" : "save stored in this category");
+}
+
+static void act_state_dump(menu_item_t *it)
+{
+  osk_open("name this save (empty: save_NNN)", "", state_named, 0);
+}
+
+static void act_state_experimental(menu_item_t *it)
+{
+  osk_open("name this EXPERIMENTAL save (empty: save_NNN)", "", state_named, 1);
+}
+
+static void act_state_rescan(menu_item_t *it)
+{
+  savestates_scan();
+}
+
+static int get_state_category(menu_item_t *it)
+{
+  return savestates_category_index();
+}
+
+static void set_state_category(menu_item_t *it, int choice)
+{
+  savestates_select_category(choice);
+}
+
+static void text_state_category(menu_item_t *it, int choice, char *buf, int len)
+{
+  snprintf(buf, len, "%s", savestates_category_name(choice));
+}
+
+static int get_state_page(menu_item_t *it)
+{
+  return savestates_page();
+}
+
+static void set_state_page(menu_item_t *it, int choice)
+{
+  savestates_select_page(choice);
+}
+
+static void text_state_page(menu_item_t *it, int choice, char *buf, int len)
+{
+  snprintf(buf, len, "%d/%d", choice + 1, savestates_pages());
+}
+
+static void text_states(menu_item_t *it, char *buf, int len)
+{
+  savestates_status_text(buf, len);
+}
+
+static void rebuild_savestates(void)
+{
+  menu_item_t *it;
+  menu_reset(&m_states);
+  it = menu_add_option(&m_states, "category", savestates_category_count(), 0, get_state_category, set_state_category, 0);
+  if (it) {
+    it->choice_text = text_state_category;
+    it->log_label = "";
+    it->hint = "d-left/right: change category, a folder of saves on your computer (one per speedrun category).";
+  }
+  if (savestates_pages() > 1) {
+    it = menu_add_option(&m_states, "page", savestates_pages(), 0, get_state_page, set_state_page, 0);
+    if (it) {
+      it->choice_text = text_state_page;
+      it->log_label = "";
+      it->hint = "d-left/right: previous or next page of this category's saves.";
+    }
+  }
+  int first = savestates_page_first();
+  for (int i = first; i < savestates_count() && i < first + savestates_page_size(); i++) {
+    it = menu_add_action(&m_states, savestates_name(i), act_state_apply, i);
+    if (it) {
+      it->hint = "L: replace your manual save with this one, then load it from the top of the game's load screen.";
+      it->log_label = "";
+    }
+  }
+  it = menu_add_action(&m_states, "force save (experimental)", act_state_experimental, 0);
+  if (it)
+    it->hint = "Experimental, not foolproof. Stores the game as it is now. Not during cutscenes or boss fights.";
+  it = menu_add_action(&m_states, "store manual save", act_state_dump, 0);
+  if (it)
+    it->hint = "Name it on the keyboard. Keeps your current manual save as it is, in this category.";
+  it = menu_add_action(&m_states, "refresh list", act_state_rescan, 0);
+  if (it)
+    it->hint = "Read the saves folder again, after adding, renaming or deleting some in your file explorer.";
+  menu_add_return(&m_states);
+  menu_add_text(&m_states, text_states, 0);
+  m_states.footer = 1;
+  menu_refresh(&m_states);
+}
+
+static void build_savestates(void)
+{
+  menu_init(&m_states, "save manager", SAVESTATES_PAGE_MAX + 10);
+  rebuild_savestates();
+  states_built = savestates_generation();
+}
+
+/* once a frame, after savebackup_frame: the list follows the SD card, and the page the menu's room */
+void menus_savestates_poll(void)
+{
+  savestates_set_page_size(gfx_menu_rows - STATES_ROWS_AROUND);
+  int now = savestates_generation();
+  if (now != states_built) {
+    states_built = now;
+    rebuild_savestates();
+  }
 }
 
 /* the order matters: menu_init reserves each menu's items from one shared pool */
@@ -3526,6 +3660,7 @@ void menus_build(void)
   build_story();
   build_watches();
   build_scene();
+  build_savestates();
   build_settings();
   build_debug();
   osk_build();

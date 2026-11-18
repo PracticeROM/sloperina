@@ -89,13 +89,14 @@ only the IPS32 whose filename matches the build ID of `main` (offsets include th
 
 ## Updating
 
-Install the new version the same way; it replaces the old files. Your settings are kept.
+Install the new version the same way; it replaces the old files. Your settings and saves are kept.
 
 ## Removing it
 
 Run the installer with **-Uninstall** / **--uninstall**, or delete the `sloperinaGZ` folders listed above (and, on
 a console, `atmosphere/contents/0400486024DEC000/exefs/subsdk9` if no other mod uses it). Your settings are in
-`sloperinaGZ/settings.ini` on the (emulator's) SD card; delete that folder too to remove them.
+`sloperinaGZ/settings.ini` on the (emulator's) SD card, and your saves in `sloperinaGZ/savestates`; delete that
+folder too to remove them.
 
 ## Coming from ootgz
 
