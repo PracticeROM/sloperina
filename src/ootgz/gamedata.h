@@ -40,6 +40,8 @@ void      gd_set_int(uint32_t hash, int32_t value);
 /* Int, written directly with its copy (applies at once, like game.py set_field). */
 bool      gd_poke_int(uint32_t hash, int32_t value);
 
+/* Int read straight from its object (false when the hash isn't an Int field): no call into the game */
+bool      gd_peek_int(uint32_t hash, int32_t *out);
 bool      gd_get_bool(uint32_t hash, bool *out);
 bool      gd_set_bool(uint32_t hash, bool value);
 bool      gd_get_float(uint32_t hash, float *out);

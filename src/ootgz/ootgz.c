@@ -415,6 +415,7 @@ static void frame(void)
   settings_log_frame();
   flaglog_frame(true); /* what this frame's menu and cheats changed */
   savebackup_frame();
+  menus_savestates_poll();
   fa_frame(); /* last: the frame's work is done before the game is held */
 }
 

@@ -22,4 +22,32 @@ void savebackup_frame(void);
 /* For the menu: the last backup, or why there's none. */
 void savebackup_status_text(char *buf, int len);
 
+
+/* Savestates: saves in sd:/sloperinaGZ/savestates/<category>/<name>/slot_NN/ (progress.sav + caption.sav), copied
+ * into ONE slot of the game's save folder (slot_01) on request, or dumped from it. */
+#define SAVESTATES_MAX 512      /* saves per category */
+#define SAVESTATES_CATS_MAX 32  /* categories */
+#define SAVESTATES_PAGE_MAX 8   /* most saves shown on one menu page (fewer when the menu is short) */
+#define SAVESTATES_PAGE_MIN 3   /* fewest: the menu scrolls rather than show fewer */
+void savestates_scan(void);            /* list the folders (also done once when the SD card is up) */
+int savestates_count(void);            /* saves in the current category */
+const char *savestates_name(int i);
+int savestates_category_count(void);
+int savestates_category_index(void);   /* the current category, -1 when there is none */
+const char *savestates_category_name(int i);
+void savestates_select_category(int i);
+int savestates_page_size(void);        /* saves per menu page now */
+void savestates_set_page_size(int n);  /* the first save on screen stays on screen */
+int savestates_page_first(void);       /* index of the first save of the current menu page */
+int savestates_page(void);
+int savestates_pages(void);
+void savestates_select_page(int i);
+int savestates_generation(void);       /* changes when the list does: the menu rebuilds itself */
+const char *savestates_apply(int i);   /* 0 when done, else what went wrong (also in savestates_result) */
+/* slot_01 -> a new save called name (empty: save_NNN); 0 when done, else what went wrong. experimental: the new
+ * save's progress.sav is then brought up to date from the live game data and Link's position (EXPERIMENTAL) */
+const char *savestates_dump(const char *name, bool experimental);
+const char *savestates_result(void);   /* what the last apply/dump did, or why it couldn't */
+void savestates_status_text(char *buf, int len);
+
 #endif

@@ -32,6 +32,8 @@ goes back.
 - **inventory**: items, equipment, collection (upgrades, strength, scale, magic), bottles, quest items, songs,
   dungeon items and small keys, all through the game's own code where it needs it.
 - **equips**, **story** (quest stages, tutorials).
+- **save manager**: copy saved spots from the SD card over the game's manual save, and store your own (see the
+  manual, 2.8).
 - **watches**: gz's watch list: built-in watches (position, speed, angles, camera, input, timer, lag...) and
   memory watches, with display types, labels (gz's keyboard), show/hide, reordering and the wrench to see the value
   in memory; the box can go in any corner or anywhere.

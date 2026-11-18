@@ -10,6 +10,7 @@
 
 #include "gfx.h"
 #include "gamedata.h"
+#include "link.h"
 #include "got.h"
 #include "lang.h"
 #include "sdfs.h"
@@ -85,6 +86,8 @@ static delete_tree_fn delete_tree;
 
 /* main's two commit imports: what each wrapper calls (got_hook) */
 static void *next_commit_save, *next_commit;
+/* the game's save mount ("<name>"), learned from its first successful commit: savestates are written there */
+static char known_mount[32];
 
 /* the console's clock (nn::time, as flaglog.c) */
 typedef struct { int64_t value; } nn_posix_time_t;
@@ -313,19 +316,29 @@ static void back_up(const char *mount)
   __atomic_store_n(&busy, 0, __ATOMIC_RELEASE);
 }
 
+static void note_mount(const char *mount)
+{
+  if (mount && mount[0] && strlen(mount) < sizeof(known_mount) && compare_names(mount, known_mount) != 0)
+    snprintf(known_mount, sizeof(known_mount), "%s", mount);
+}
+
 static nn_result_t commit_save_wrap(const char *mount)
 {
   nn_result_t r = ((commit_fn)next_commit_save)(mount);
-  if (r == 0)
+  if (r == 0) {
+    note_mount(mount);
     back_up(mount);
+  }
   return r;
 }
 
 static nn_result_t commit_wrap(const char *mount)
 {
   nn_result_t r = ((commit_fn)next_commit)(mount);
-  if (r == 0)
+  if (r == 0) {
+    note_mount(mount);
     back_up(mount);
+  }
   return r;
 }
 
@@ -353,9 +366,13 @@ const char *savebackup_hook_game(uintptr_t main_base)
   return 0;
 }
 
+static bool states_scanned;
+
 void savebackup_frame(void)
 {
   uint32_t screen;
+  if (!states_scanned && settings_sd() && open_dir)
+    savestates_scan();
   if (save_backup_enabled && gd_get_enum(GD_MENU_SCREEN, &screen))
     __atomic_store_n(&menu_screen, screen, __ATOMIC_RELEASE);
   int skipped = __atomic_load_n(&skips, __ATOMIC_ACQUIRE);
@@ -401,4 +418,470 @@ void savebackup_status_text(char *buf, int len)
     snprintf(buf, len, TF("last: %s failed (see the log)"), last_stamp);
   else
     snprintf(buf, len, TF("last: %s (%s)"), last_stamp, T(kind_names[last_kind]));
+}
+
+/* ---- savestates: saves kept on the SD card, by category ----------------------------------------------------
+ * sd:/sloperinaGZ/savestates/<category>/<name>/slot_NN/{progress.sav,caption.sav}: the same files the game keeps in
+ * its save folder (a Fritchii/Eden export of one slot). Applying one copies its slot over slot_01 of the game's save
+ * mount (the "target slot": the one at the top of the load screen) and commits, as the game's own save does; the
+ * game then loads it from its load screen like any other save. Dumping does the opposite: slot_01 is copied to the
+ * SD card as a new save in the current category, named on the keyboard (empty: save_NNN). */
+#define STATES_DIR SD_DIR "/savestates"
+#define STATE_NAME_LEN 64
+
+static char cat_names[SAVESTATES_CATS_MAX][STATE_NAME_LEN];
+static int cat_count, cur_cat;
+static char state_names[SAVESTATES_MAX][STATE_NAME_LEN];
+static int state_count, state_page, page_size = SAVESTATES_PAGE_MAX;
+#define TARGET_SLOT 1 /* fixed: always slot_01 */
+static volatile int state_generation;
+static fs_dir_entry_t state_entry;
+static char state_result[200];
+
+static void states_changed(void)
+{
+  __atomic_add_fetch(&state_generation, 1, __ATOMIC_RELEASE);
+}
+
+int savestates_count(void)
+{
+  return state_count;
+}
+
+const char *savestates_name(int i)
+{
+  return i >= 0 && i < state_count ? state_names[i] : "";
+}
+
+int savestates_category_count(void)
+{
+  return cat_count;
+}
+
+int savestates_category_index(void)
+{
+  return cat_count ? cur_cat : -1;
+}
+
+const char *savestates_category_name(int i)
+{
+  return i >= 0 && i < cat_count ? cat_names[i] : "-";
+}
+
+int savestates_page_size(void)
+{
+  return page_size;
+}
+
+int savestates_page_first(void)
+{
+  return state_page * page_size;
+}
+
+int savestates_page(void)
+{
+  return state_page;
+}
+
+int savestates_pages(void)
+{
+  return (state_count + page_size - 1) / page_size;
+}
+
+int savestates_generation(void)
+{
+  return state_generation;
+}
+
+const char *savestates_result(void)
+{
+  return state_result;
+}
+
+static void sort_names(char (*names)[STATE_NAME_LEN], int n)
+{
+  static char swap[STATE_NAME_LEN];
+  for (int i = 1; i < n; i++)
+    for (int j = i; j > 0 && compare_names(names[j - 1], names[j]) > 0; j--) {
+      memcpy(swap, names[j], STATE_NAME_LEN);
+      memcpy(names[j], names[j - 1], STATE_NAME_LEN);
+      memcpy(names[j - 1], swap, STATE_NAME_LEN);
+    }
+}
+
+/* the sub-folders of path, sorted, at most max */
+static int list_dirs(const char *path, char (*out)[STATE_NAME_LEN], int max)
+{
+  int n = 0;
+  fs_dir_t dir;
+  int64_t count;
+  if (open_dir(&dir, path, FS_OPEN_DIR_ALL) == 0) {
+    while (n < max && read_dir(&count, &state_entry, dir, 1) == 0 && count == 1)
+      if (state_entry.type == FS_ENTRY_DIRECTORY && strlen(state_entry.name) < STATE_NAME_LEN)
+        snprintf(out[n++], STATE_NAME_LEN, "%s", state_entry.name);
+    close_dir(dir);
+  }
+  sort_names(out, n);
+  return n;
+}
+
+/* the current category's saves */
+static void scan_states(void)
+{
+  char path[PATH_LEN];
+  state_count = 0;
+  if (cat_count) {
+    join(path, STATES_DIR, cat_names[cur_cat]);
+    state_count = list_dirs(path, state_names, SAVESTATES_MAX);
+  }
+  int pages = savestates_pages();
+  if (state_page >= pages)
+    state_page = pages > 0 ? pages - 1 : 0;
+}
+
+void savestates_scan(void)
+{
+  char keep[STATE_NAME_LEN] = "";
+  if (cat_count)
+    snprintf(keep, sizeof(keep), "%s", cat_names[cur_cat]);
+  states_scanned = true;
+  cat_count = 0;
+  if (settings_sd() && open_dir && read_dir && close_dir) {
+    fs_create_dir(SD_DIR);
+    fs_create_dir(STATES_DIR);
+    cat_count = list_dirs(STATES_DIR, cat_names, SAVESTATES_CATS_MAX);
+  }
+  cur_cat = 0; /* stay on the same category when it still exists */
+  for (int i = 0; i < cat_count; i++)
+    if (compare_names(cat_names[i], keep) == 0)
+      cur_cat = i;
+  scan_states();
+  states_changed();
+}
+
+void savestates_select_category(int i)
+{
+  if (i >= 0 && i < cat_count && i != cur_cat) {
+    cur_cat = i;
+    state_page = 0;
+    scan_states();
+  }
+  state_result[0] = 0;
+  states_changed();
+}
+
+void savestates_select_page(int i)
+{
+  if (i >= 0 && i < savestates_pages())
+    state_page = i;
+  states_changed();
+}
+
+void savestates_set_page_size(int n)
+{
+  n = n < SAVESTATES_PAGE_MIN ? SAVESTATES_PAGE_MIN : n > SAVESTATES_PAGE_MAX ? SAVESTATES_PAGE_MAX : n;
+  if (n == page_size)
+    return;
+  int first = state_page * page_size; /* the same first save stays on the page */
+  page_size = n;
+  state_page = first / n;
+  states_changed();
+}
+
+/* a reason the menu shows under the list and in the log */
+static const char *refuse(const char *text)
+{
+  snprintf(state_result, sizeof(state_result), "%s", text);
+  return state_result;
+}
+
+static bool is_slot_dir(const char *name)
+{
+  return name[0] == 's' && name[1] == 'l' && name[2] == 'o' && name[3] == 't' && name[4] == '_';
+}
+
+/* NULL when done (the result text then says what), else what went wrong */
+const char *savestates_apply(int index)
+{
+  state_result[0] = 0;
+  if (!cat_count || index < 0 || index >= state_count)
+    return refuse("no such save"); /* not menu text */
+  if (!known_mount[0])
+    return refuse("save once in the game first (or pass a loading zone)"); /* not menu text */
+  if (!settings_sd() || !open_dir || !read_dir || !close_dir)
+    return refuse("no SD card access"); /* not menu text */
+  if (__atomic_exchange_n(&busy, 1, __ATOMIC_ACQUIRE))
+    return refuse("a copy is already running"); /* not menu text */
+  error[0] = 0;
+  files_copied = 0;
+  bytes_copied = 0;
+  char cat[PATH_LEN], from[PATH_LEN], src[PATH_LEN], to_root[48], to[PATH_LEN], target[16];
+  char slot[STATE_NAME_LEN] = "";
+  join(cat, STATES_DIR, cat_names[cur_cat]);
+  join(from, cat, state_names[index]);
+  snprintf(target, sizeof(target), "slot_%02d", TARGET_SLOT);
+  fs_dir_t dir;
+  int64_t count;
+  nn_result_t r = open_dir(&dir, from, FS_OPEN_DIR_ALL);
+  if (r != 0) {
+    fail("couldn't list", from, r); /* not menu text */
+  } else {
+    /* the save's slot folder, whatever its number: it goes into the target slot */
+    while (read_dir(&count, &state_entry, dir, 1) == 0 && count == 1)
+      if (state_entry.type == FS_ENTRY_DIRECTORY && is_slot_dir(state_entry.name) &&
+          strlen(state_entry.name) < STATE_NAME_LEN) {
+        snprintf(slot, sizeof(slot), "%s", state_entry.name);
+        break;
+      }
+    close_dir(dir);
+    if (!slot[0])
+      fail("no slot_NN folder in", from, 0); /* not menu text */
+  }
+  if (!error[0]) {
+    join(src, from, slot);
+    snprintf(to_root, sizeof(to_root), "%s:/", known_mount);
+    join(to, to_root, target);
+    fs_create_dir(to);
+    copy_tree(src, to, 1);
+  }
+  if (!error[0]) {
+    void *commit_now = next_commit_save ? next_commit_save : next_commit;
+    if (commit_now && (r = ((commit_fn)commit_now)(known_mount)) != 0)
+      fail("couldn't commit", known_mount, r); /* not menu text */
+  }
+  const char *out = 0;
+  if (error[0]) {
+    snprintf(state_result, sizeof(state_result), "%s", error);
+    out = state_result;
+  } else {
+    snprintf(state_result, sizeof(state_result), "manual save replaced: load it from the load screen"); /* not menu text */
+  }
+  __atomic_store_n(&busy, 0, __ATOMIC_RELEASE);
+  return out;
+}
+
+/* ---- EXPERIMENTAL: a progress.sav rebuilt from the live game ----------------
+ * progress.sav (FINDINGS "Save files"): a 0x20 header (magic 0x01020304, a word, the end of the table), then
+ * (hash, value) pairs up to that end, then the data they point at (String64: 64 bytes; Vector3: 3 floats). The
+ * copy of slot_01 already made is the template: each pair of a field the live GameData holds as a Bool / Int /
+ * Float / Enum / String64 gets its live value, the restart point (PlayerStatus.SavePos, its yaw, and the two
+ * other copies of it) gets Link's position and facing. Fields of other types (UInt, arrays, ...) keep what the
+ * template had. Only the copy on the SD card is written, never the game's own save. */
+#define PROGRESS_MAGIC 0x01020304u
+#define PROGRESS_HEADER 0x20
+#define H_SAVEPOS_RADY 0x1EA93BD8u /* PlayerStatus.SavePosRadY (Float) */
+static const uint32_t pos_hashes[3] = { 0xC884818Du /* PlayerStatus.SavePos */, 0x8773F02Du /* same point, name unknown */,
+                                        0x960AD56Au /* Player_Pos_For_Map */ };
+static _Alignas(8) uint8_t str_slot[GD_STR_LEN];
+
+float atan2f(float y, float x); /* from sdk */
+
+static void fail_text(const char *text)
+{
+  if (!error[0])
+    snprintf(error, sizeof(error), "%s", text);
+}
+
+/* how many fields were brought up to date; errors go to `error` */
+static int refresh_progress(const char *path)
+{
+  if (!gd_ready()) {
+    fail_text("game data not ready (is the game loaded?)"); /* not menu text */
+    return 0;
+  }
+  vec3f_t pos;
+  double fx, fz;
+  if (!link_drawn_pos(&pos) || !link_facing(&fx, &fz)) {
+    fail_text("Link not found (is a scene loaded?)"); /* not menu text */
+    return 0;
+  }
+  float yaw = atan2f((float)fx, (float)fz);
+  fs_file_t f;
+  nn_result_t r;
+  int64_t size = 0;
+  int changed = 0;
+  uint32_t pos_at[3] = { 0, 0, 0 };
+  if ((r = fs_open(&f, path, FS_READ | FS_WRITE)) != 0) {
+    fail("couldn't open", path, r); /* not menu text */
+    return 0;
+  }
+  fs_size(&size, f);
+  size_t got = 0;
+  uint32_t head[PROGRESS_HEADER / 4];
+  if (fs_read(&got, f, 0, head, PROGRESS_HEADER) != 0 || got != PROGRESS_HEADER || head[0] != PROGRESS_MAGIC ||
+      head[2] < PROGRESS_HEADER || head[2] > size || (head[2] - PROGRESS_HEADER) % 8) {
+    fail_text("progress.sav isn't in the format expected"); /* not menu text */
+    fs_close(f);
+    return 0;
+  }
+  uint32_t end = head[2];
+  fs_write_option_t keep = { 0 };
+  for (int64_t at = PROGRESS_HEADER; at < end && !error[0];) {
+    size_t len = end - at < COPY_CHUNK ? (size_t)(end - at) : COPY_CHUNK;
+    if (fs_read(&got, f, at, chunk, len) != 0 || got != len) {
+      fail("couldn't read", path, 0); /* not menu text */
+      break;
+    }
+    uint32_t *pairs = (uint32_t *)chunk;
+    bool dirty = false;
+    for (size_t i = 0; i + 1 < len / 4; i += 2) {
+      uint32_t h = pairs[i], v = pairs[i + 1], nv = v;
+      bool is_pos = false;
+      for (int k = 0; k < 3; k++)
+        if (h == pos_hashes[k]) {
+          pos_at[k] = v;
+          is_pos = true;
+        }
+      if (is_pos)
+        continue;
+      bool b;
+      float fl;
+      uint32_t en;
+      int32_t iv;
+      if (h == H_SAVEPOS_RADY) {
+        memcpy(&nv, &yaw, 4);
+      } else if (gd_get_bool(h, &b)) {
+        nv = b ? 1 : 0;
+      } else if (gd_get_float(h, &fl)) {
+        memcpy(&nv, &fl, 4);
+      } else if (gd_get_enum(h, &en)) {
+        nv = en;
+      } else if (gd_peek_int(h, &iv)) {
+        nv = (uint32_t)iv;
+      } else {
+        const char *s = gd_get_str(h);
+        if (s && v >= end && (int64_t)v + GD_STR_LEN <= size) {
+          int n = 0;
+          for (; n < GD_STR_LEN - 1 && s[n]; n++)
+            str_slot[n] = (uint8_t)s[n];
+          for (; n < GD_STR_LEN; n++)
+            str_slot[n] = 0;
+          if (fs_write(f, v, str_slot, GD_STR_LEN, &keep) == 0)
+            changed++;
+        }
+        continue;
+      }
+      if (nv != v) {
+        pairs[i + 1] = nv;
+        dirty = true;
+        changed++;
+      }
+    }
+    if (dirty && (r = fs_write(f, at, chunk, len, &keep)) != 0)
+      fail("couldn't write", path, r); /* not menu text */
+    at += len;
+  }
+  float where[3] = { pos.x, pos.y, pos.z };
+  for (int k = 0; k < 3 && !error[0]; k++)
+    if (pos_at[k] >= end && (int64_t)pos_at[k] + 12 <= size) {
+      fs_write_option_t flush = { k == 2 ? FS_WRITE_FLUSH : 0 };
+      if ((r = fs_write(f, pos_at[k], where, sizeof(where), &flush)) != 0)
+        fail("couldn't write", path, r); /* not menu text */
+      else
+        changed++;
+    }
+  fs_close(f);
+  return changed;
+}
+
+/* the target slot of the game -> a new save in the current category, called `wanted` (empty: save_NNN) */
+const char *savestates_dump(const char *wanted, bool experimental)
+{
+  state_result[0] = 0;
+  if (!known_mount[0])
+    return refuse("save once in the game first (or pass a loading zone)"); /* not menu text */
+  if (!settings_sd() || !open_dir || !read_dir || !close_dir)
+    return refuse("no SD card access"); /* not menu text */
+  if (state_count >= SAVESTATES_MAX)
+    return refuse("this category is full"); /* not menu text */
+  if (__atomic_exchange_n(&busy, 1, __ATOMIC_ACQUIRE))
+    return refuse("a copy is already running"); /* not menu text */
+  error[0] = 0;
+  files_copied = 0;
+  bytes_copied = 0;
+  char cat[PATH_LEN], st[PATH_LEN], dst[PATH_LEN], src_root[48], src[PATH_LEN], target[16], name[STATE_NAME_LEN];
+  fs_create_dir(SD_DIR);
+  fs_create_dir(STATES_DIR);
+  if (!cat_count) { /* first save ever: it needs a category */
+    snprintf(cat_names[0], STATE_NAME_LEN, "default"); /* not menu text */
+    cat_count = 1;
+    cur_cat = 0;
+    state_count = 0;
+  }
+  join(cat, STATES_DIR, cat_names[cur_cat]);
+  fs_create_dir(cat);
+  /* the name typed on the keyboard: only characters a folder name can hold, none of them at the ends */
+  char base[STATE_NAME_LEN - 8];
+  int bl = 0;
+  for (const char *c = wanted ? wanted : ""; *c && bl < (int)sizeof(base) - 1; c++)
+    if (*c >= ' ' && *c != '/' && *c != '\\' && *c != ':' && *c != '*' && *c != '?' && *c != '"' && *c != '<' &&
+        *c != '>' && *c != '|' && !(bl == 0 && *c == ' '))
+      base[bl++] = *c;
+  while (bl > 0 && (base[bl - 1] == ' ' || base[bl - 1] == '.'))
+    bl--;
+  base[bl] = 0;
+  for (int n = 1; n < 100000; n++) { /* the first name not taken: the typed one, then "name (2)", ..., or save_NNN */
+    if (!bl)
+      snprintf(name, sizeof(name), "save_%03d", n);
+    else if (n == 1)
+      snprintf(name, sizeof(name), "%s", base);
+    else
+      snprintf(name, sizeof(name), "%s (%d)", base, n);
+    bool taken = false;
+    for (int i = 0; i < state_count; i++)
+      if (compare_names(state_names[i], name) == 0)
+        taken = true;
+    if (!taken)
+      break;
+  }
+  snprintf(target, sizeof(target), "slot_%02d", TARGET_SLOT);
+  snprintf(src_root, sizeof(src_root), "%s:/", known_mount);
+  join(src, src_root, target);
+  fs_dir_t probe;
+  if (open_dir(&probe, src, FS_OPEN_DIR_ALL) != 0) { /* nothing there: don't leave an empty save behind */
+    __atomic_store_n(&busy, 0, __ATOMIC_RELEASE);
+    snprintf(state_result, sizeof(state_result), "no manual save yet: save in the game first"); /* not menu text */
+    return state_result;
+  }
+  close_dir(probe);
+  join(st, cat, name);
+  join(dst, st, target);
+  fs_create_dir(st);
+  fs_create_dir(dst);
+  copy_tree(src, dst, 1);
+  int refreshed = 0;
+  if (experimental && !error[0]) {
+    char prog[PATH_LEN];
+    join(prog, dst, "progress.sav");
+    refreshed = refresh_progress(prog);
+  }
+  const char *out = 0;
+  if (error[0]) {
+    snprintf(state_result, sizeof(state_result), "%s", error);
+    out = state_result;
+  } else if (experimental) {
+    snprintf(state_result, sizeof(state_result), "stored %s from the live game (%d fields)", name, refreshed); /* not menu text */
+  } else {
+    snprintf(state_result, sizeof(state_result), "stored %s from your manual save (%d files)", name, files_copied); /* not menu text */
+  }
+  scan_states();
+  states_changed();
+  __atomic_store_n(&busy, 0, __ATOMIC_RELEASE);
+  return out;
+}
+
+void savestates_status_text(char *buf, int len)
+{
+  if (hook_error)
+    snprintf(buf, len, TF("unavailable: %s"), hook_error); /* hook_error: not menu text */
+  else if (!settings_sd())
+    snprintf(buf, len, "%s", T("no SD card access"));
+  else if (state_result[0])
+    snprintf(buf, len, "%s", state_result);
+  else if (!cat_count)
+    snprintf(buf, len, "no save yet: store one from the menu, or add folders on your computer"); /* not menu text */
+  else if (!known_mount[0])
+    snprintf(buf, len, "save once in the game first (or pass a loading zone)"); /* not menu text */
+  else
+    snprintf(buf, len, "%d saves in %s", state_count, cat_names[cur_cat]); /* not menu text */
 }

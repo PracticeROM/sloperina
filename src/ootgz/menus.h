@@ -6,6 +6,7 @@
 
 extern menu_t menu_root;
 void menus_build(void);
+void menus_savestates_poll(void); /* once a frame: rebuild the savestates menu if the SD card list changed */
 void menus_splash(void); /* gz's start-up splash */
 
 /* defined in ootgz.c */

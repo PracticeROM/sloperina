@@ -190,6 +190,14 @@ bool gd_poke_int(uint32_t hash, int32_t value)
 
 /* --- other types (direct, value + copy, as game.py) -------------------------------------- */
 
+bool gd_peek_int(uint32_t hash, int32_t *out)
+{
+  int32_t *v = (int32_t *)gd_value(GD_INT, hash);
+  if (v)
+    *out = v[0];
+  return v != 0;
+}
+
 bool gd_get_bool(uint32_t hash, bool *out)
 {
   uint8_t *v = gd_value(GD_BOOL, hash);

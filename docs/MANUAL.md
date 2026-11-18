@@ -16,11 +16,12 @@ Everything sloperinaGZ can do, menu by menu. New to it? Start with the [usage gu
   - [2.5 Inventory](#25-inventory)
   - [2.6 Equips](#26-equips)
   - [2.7 Story](#27-story)
-  - [2.8 Watches](#28-watches)
-  - [2.9 Debug](#29-debug)
-  - [2.10 Settings](#210-settings)
-  - [2.11 Log](#211-log)
-  - [2.12 About](#212-about)
+  - [2.8 Save manager](#28-save-manager)
+  - [2.9 Watches](#29-watches)
+  - [2.10 Debug](#210-debug)
+  - [2.11 Settings](#211-settings)
+  - [2.12 Log](#212-log)
+  - [2.13 About](#213-about)
 - [3 On the screen](#3-on-the-screen)
 - [4 About frame advance](#4-about-frame-advance)
 - [5 Settings file](#5-settings-file)
@@ -71,11 +72,11 @@ With the menu closed:
 | **R + A + D-pad right** | Reset **jump height** to FLT_MAX (as after a load: the jumpslash then works at any height) |
 | **R + D-pad up** | Save position: where Link is and which way he faces |
 | **R + D-pad down** | Load position: put Link back there (same map only) |
-| **L3** | Levitate on / off (if enabled, [2.10.2](#2102-levitate)) |
+| **L3** | Levitate on / off (if enabled, [2.11.2](#2112-levitate)) |
 | **X / B** held | Levitate up / down; release to hover |
 | **R3** held | Levitate: hold height even if X/B is held |
 | **R3** | Ragdoll (as a bomb hit) when not levitating |
-| **L** or **R** (your choice) | Frame advance (if enabled, [2.10.3](#2103-frame-advance)) |
+| **L** or **R** (your choice) | Frame advance (if enabled, [2.11.3](#2113-frame-advance)) |
 
 ## 2 Menus
 
@@ -218,7 +219,25 @@ What Link is wearing and holding right now (read only).
 | **all tutorials seen** | Marks every tutorial message as seen, so they stop popping up. |
 | *each quest* | The quest's current stage; D-pad left / right (or **L**) changes it. It takes effect after a loading zone. |
 
-### 2.8 Watches
+### 2.8 Save manager
+
+Saves kept on the SD card in `sloperinaGZ/savestates/<category>/<name>/`, copied over your **manual save** (the save slot on the game’s load screen without the "Autosave" label). Nothing changes in the running game until you load it.
+Save once in the game first (or go through a loading zone): that is how sloperinaGZ finds the game's save folder.
+
+| Item | What it does |
+|---|---|
+| **category** | D-pad left / right: which folder of saves to show. |
+| **page** | D-pad left / right: the next page, when the category has more saves than fit. |
+| *each save* | **L** replaces your manual save with it. Then load the save slot without the "Autosave" label on the game’s load screen. |
+| **force save (experimental)** | Names it on the keyboard, then stores the game as it is now. Not foolproof; doesn't work during a cutscene or a boss fight. |
+| **store manual save** | Names it on the keyboard, then stores your manual save as the game last saved it. |
+| **refresh list** | Reads the saves folder again after you add, rename or delete saves. |
+
+The line under **return** says what the last action did or why it failed. Saves are listed by name. Force save
+rebuilds the save from the running game and puts you back where you stand; the name and place on the load screen
+stay those of the manual save.
+
+### 2.9 Watches
 
 gz's watch list: values shown on the screen in a box while you play.
 
@@ -284,7 +303,7 @@ freeze, not a patch of the game's setter: writes and checks within a single game
 before the mod runs. Build and host tests do not establish whether this prevents every launch restriction
 in-game; test normal jumps, sidehops, jumpslashes, scene changes, and restarts on the supported game version.
 
-### 2.9 Debug
+### 2.10 Debug
 
 **tests > dive tests**: **from heights** and **while moving** measure how deep Link goes into water by how he falls in. Start
 one with Link swimming at the surface (facing open water for **while moving**) and leave the controls alone: it
@@ -292,11 +311,11 @@ measures the surface, drops him again and again from set heights (from heights: 
 16 and 96 above it, 0 to 13.6 units/s the way he faces), twice each, and writes each drop's fall time, speed
 going in, and deepest point to `log.txt` ("dive test: ..."). Choose it again to stop.
 
-#### 2.9.1 Heap
+#### 2.10.1 Heap
 
 How much memory the game has and uses (refreshed every second), and **view the heap in memory**.
 
-#### 2.9.2 Memory
+#### 2.10.2 Memory
 
 gz's memory viewer.
 
@@ -310,11 +329,11 @@ gz's memory viewer.
 
 Unreadable memory shows as `??`; read-only memory can't be changed. **Editing memory can crash the game.**
 
-#### 2.9.3 Pause research
+#### 2.10.3 Pause research
 
 The game's own pause state, for development: values you can watch, change and log.
 
-#### 2.9.4 Flag logging
+#### 2.10.4 Flag logging
 
 Records changes to the game's saved progress flags while you play, to learn what each flag is for. Every named story
 flag, event flag, item flag, counter and quest stage kept in the save is compared with the frame before. Flags
@@ -330,7 +349,7 @@ files go to `sloperinaGZ/flaglog/` on the SD card. There are three, each with it
 The switches are kept in the settings, so they stay on across starts. The lines under the menu show each file and
 how many rows this session has added. While **record flag changes** is on, **Event flag written to CSV** shows in the bottom right
 when a flag changes, at most once a second ("3 event flags written to CSV" when more changed in that time). Each
-change is also kept in the log menu: choose **event flags** as its filter (2.11).
+change is also kept in the log menu: choose **event flags** as its filter (2.12).
 
 Each row has the date and time (the console's clock, e.g. `13/11/2026 15:47:02`), the seconds since this session's recording
 started, the frame, the map, Link's position, what Link was doing (`EvtTalk` while he talks; 1.1.1 only), the
@@ -359,7 +378,7 @@ also adds the script (`set_by`, e.g. `SageOfWater/IceCavern_WaterSerenade` for t
 `Step04`), the NPC and the dialogue just before the change. The scripts say who *can* set a flag, so when several
 can, the `match` column says how sure the pick is; see the tool's help.
 
-### 2.10 Settings
+### 2.11 Settings
 
 **menu settings**: **language** ([6](#6-languages)), **size** (auto, small 2x, medium 2.5x, large 3x: the menu, watches
 and log), **background opacity** (0 to 100%, 100% at first; below 100% the game shows through, slightly behind) and
@@ -373,7 +392,7 @@ They stay over the item wheel unless **hide over item wheel** is on.
 
 **other settings**: the **input display**, **levitate**, **frame advance** and **save backups** menus below.
 
-#### 2.10.1 Input display
+#### 2.11.1 Input display
 
 gz's input display, at the bottom left unless you move it (hidden while the menu is open).
 
@@ -387,7 +406,7 @@ gz's input display, at the bottom left unless you move it (hidden while the menu
 | **position** | The corner it's in, or **custom** (where **move input display position** left it), as the watches box. |
 | **move input display position** | Move it anywhere: the D-pad glides it (hold to speed up), **L** leaves it there. It's shown while you move it, and so are the watches if they're on. |
 
-#### 2.10.2 Levitate
+#### 2.11.2 Levitate
 
 | Item | What it does |
 |---|---|
@@ -415,7 +434,7 @@ and no landing damage. This does not establish behavior at every surface or duri
 Void protection is not included (what voids Link can be seen with [2.3.3](#233-void-out)). Camera-follow and stationary-position
 pause behavior have not been separately fixed.
 
-#### 2.10.3 Frame advance
+#### 2.11.3 Frame advance
 
 | Item | What it does |
 |---|---|
@@ -424,7 +443,7 @@ pause behavior have not been separately fixed.
 | **pause icon** | gz's pause icon at the top left while paused. |
 | **button** | **L** or **R**. The game doesn't see that button while frame advance is on. |
 
-#### 2.10.4 Save backups
+#### 2.11.4 Save backups
 
 After a save the game makes, the whole save folder (every slot, and the options) can be copied to
 `sloperinaGZ/save-backups/<date>_<time>/` on the SD card, e.g. `2026-11-15_21-30-05` (year first, so they sort by
@@ -441,7 +460,7 @@ The line under **return** shows the last backup this session and its kind, or wh
 backed up**, shows after each one. To restore one, copy its contents back over the game's save folder with the game
 closed (on an emulator: right-click the game > *Open save data location*).
 
-### 2.11 Log
+### 2.12 Log
 
 Under **log history**: the last 128 messages sloperinaGZ wrote, newest first, five at a time. **↑** above them and
 **↓** below them scroll (hold **L** to keep going), and in the game's style a scroll bar beside them shows where you are.
@@ -450,7 +469,7 @@ Under **log history**: the last 128 messages sloperinaGZ wrote, newest first, fi
 |---|---|
 | **filter** `< all >` | Which messages: **all**, only **problems** (anything that couldn't be done), **event flags**, or one kind (warp, settings, notice... whatever kinds there are). |
 
-**event flags** shows the flag changes recorded by flag logging (2.9.4), each with the date and time, e.g.
+**event flags** shows the flag changes recorded by flag logging (2.10.4), each with the date and time, e.g.
 `13/11 15:47:02 HavePlayedEvent.Npc_Kokiri_Mido_Child_C1C2_TT 0 -> 1`. It keeps the last 128 flag changes in a list of
 their own, so other messages don't push them out. Flags without a known name show their hash.
 
@@ -458,7 +477,7 @@ Everything is also written to **`sloperinaGZ/log.txt`** on the SD card (on an em
 Lichii build 150+: `%APPDATA%\lichii\sdmc\sloperinaGZ\log.txt`; Fritchii v5.8+: `%APPDATA%\fritchii\sdmc\sloperinaGZ\log.txt`; Eden and older Lichii / Fritchii: `%APPDATA%\eden\sdmc\sloperinaGZ\log.txt`), with the time since the game started, about once a
 second. It starts fresh each time the game starts. Send it along when you report a problem.
 
-### 2.12 About
+### 2.13 About
 
 The name and version, the build date ("Build Date: ..."), and the website.
 
@@ -467,9 +486,9 @@ The name and version, the build date ("Build Date: ..."), and the website.
 | What | Where | Notes |
 |---|---|---|
 | Menu | Top left, under the D-pad icon | Always on top. |
-| Watches | The corner you choose, or anywhere | [2.8](#28-watches) |
+| Watches | The corner you choose, or anywhere | [2.9](#29-watches) |
 | Log | Bottom right | What you just did; stays a second, then fades. gz's grey text with a shadow. |
-| Input display | Bottom left, or the corner you choose, or anywhere | [2.10.1](#2101-input-display); in the bottom left, it moves above the watches if they're there too. |
+| Input display | Bottom left, or the corner you choose, or anywhere | [2.11.1](#2111-input-display); in the bottom left, it moves above the watches if they're there too. |
 | Pause icon | Top left | Two bars: paused by frame advance. |
 | Air walls | Over the game | [2.3.1](#231-environment) |
 | Save slots | Over the game | [2.3.2](#232-save-position) |
@@ -518,5 +537,6 @@ dropped (é shows as e) and other alphabets can't be shown yet.
 - Game versions **1.0.0** (base) and **1.1.1** (update v131072) are supported.
 - Collision shows the air walls; the full collision mesh isn't drawn yet.
 - Memory watches aren't kept between runs.
+- The save manager copies saves over your manual save; it isn't a snapshot of the game's memory.
 - Some changes only show after the game redraws them (pause screen, loading zone); story stages need a loading
   zone.
