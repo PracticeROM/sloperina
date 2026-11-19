@@ -18,6 +18,7 @@
 
 _Static_assert(sizeof(uintptr_t) == 8 && sizeof(float) == 4, "requires a 64-bit host with f32");
 _Static_assert(W_X == 0 && W_AIRWALL == 16 && W_JS_HEIGHT == 17, "keep saved watch IDs stable");
+_Static_assert(W_SAFETY == 18 && W_SAFETY_FLAGS == 19 && W_COUNT == 20, "keep saved watch IDs stable");
 
 uintptr_t z64hd_main;
 static const struct z64hd_build test_build; /* no build: the version-specific paths stay off */

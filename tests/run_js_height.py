@@ -30,7 +30,7 @@ def main():
     run([
         args.cc, "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror",
         "-Wno-unused-parameter", "-Isrc/ootgz", "tests/js_height.c",
-        "src/ootgz/watches.c", "src/ootgz/settings.c", "src/ootgz/gfx.c",
+        "src/ootgz/watches.c", "src/ootgz/safety.c", "src/ootgz/settings.c", "src/ootgz/gfx.c",
         "src/ootgz/font.c", "src/ootgz/menu.c", "-lm", "-o", str(exe),
     ])
     run([str(exe), str(out / "js_height.ppm"), str(out / "menu_filler.ppm")])

@@ -8,7 +8,7 @@
 typedef enum {
   W_X, W_Y, W_Z, W_FACING, W_MOVE_ANGLE, W_SPEED, W_Y_SPEED, W_CAMERA_ANGLE, W_CAMERA_PITCH,
   W_CAMERA_DIST, W_INPUT, W_STICK, W_LAG, W_TIMER, W_FRAME, W_MAP, W_AIRWALL,
-  W_JS_HEIGHT, W_COUNT /* append only: built-in IDs are saved in settings.ini */
+  W_JS_HEIGHT, W_SAFETY, W_SAFETY_FLAGS, W_COUNT /* append only: built-in IDs are saved in settings.ini */
 } watch_t;
 
 extern const char *const watch_labels[W_COUNT];
@@ -45,7 +45,7 @@ void watch_entry_text(const watch_entry_t *e, char *buf, int len);
 const char *const *watch_entry_types(const watch_entry_t *e, int *n, int *current);
 void watch_entry_set_type(int index, int type);
 /* where the value is in memory, for the wrench (debug > memory): the built-in watches that read one
- * value (position, facing, y speed, camera, frame, map, JS Height) and memory watches */
+ * value (position, facing, y speed, camera, frame, map, JS Height, safety) and memory watches */
 bool watch_entry_has_address(const watch_entry_t *e);
 /* JS Height's f32: [[link_actor() + 0x270] + 0x358] + 0x18E8 (false while a pointer is missing) */
 bool js_height_address(uintptr_t *addr);

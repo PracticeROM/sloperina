@@ -240,9 +240,11 @@ row of buttons:
 Under the list:
 
 - **📁 (known watches)**: the built-in watches: x, y, z, facing, move angle, speed, y speed, camera angle /
-  pitch / distance, input, stick, lag, timer, frame, map, air wall, jump height. Each can be in the list once.
+  pitch / distance, input, stick, lag, timer, frame, map, air wall, jump height, safety, safety flags. Each can
+  be in the list once.
   **jump height** is the height your last jump set (takeoff + 0.7; FLT_MAX until you jump after a load), which
   the jumpslash launch is limited to. It's always in the list (hide it to keep it off screen).
+  **safety** and **safety flags** show the game's safety section, below.
 - **+ (custom watch)**: a watch of any memory address. Type the address (D-pad left / right: digit, up / down:
   change it), **L** to add. It starts from your last memory watch, as in gz. One watch per address. Changed your
   mind? **B**, or D-pad left past the first digit to the **x** that takes the folder's place and **L**: no watch is
@@ -250,7 +252,32 @@ Under the list:
 
 **Display types.** Positions and speeds: **f32** (decimal), **s32** (whole number), **x32** (the float's bits).
 Angles: **deg**, **hex** (the game's 16-bit angle, 0x4000 = 90°), **s16**, **rad**. Counters: **dec**, **hex**.
-Timer: **m:s**, **sec**. Stick: **%**, **raw**. Memory watches: **u8 s8 x8 u16 s16 x16 u32 s32 x32 f32 x64**.
+Timer: **m:s**, **sec**. Stick: **%**, **raw**. Safety flags: **hex**, **flags** (a word for each one set).
+Memory watches: **u8 s8 x8 u16 s16 x16 u32 s32 x32 f32 x64**.
+
+**safety** and **safety flags** (1.1.1 only; **N/A** on 1.0.0 and while there's no scene) read the game's
+GameSafetyMgr: what a minigame, a boss fight or a story section is stopping you from doing right now. **safety** is
+the name of the setting the game has applied, such as `MiniGame_TimeStop` or `SageOfFire` (its hash, if it isn't one
+of the game's 28). **safety flags** is that setting's switches, as the game packs them:
+
+| Bit | Word | Set when |
+|---|---|---|
+| `0x0001` | mini | a challenge is in a minigame step |
+| `0x0008` | on | a safety section is active |
+| `0x0020` | area | the setting's `IsCheckSafetyArea` |
+| `0x0040` | save | `IsDisableSave` |
+| `0x0080` | warp | `IsDisableWarp` |
+| `0x0100` | place | `IsDisableAutoPlacement` |
+| `0x0200` | box | `IsDisableOpenTreasureBox` |
+| `0x0400` | grab | `IsDisableGrab` |
+| `0x0800` | boot | `IsDisableBoot` |
+| `0x1000` | time | `IsDisableTimeProgress` |
+| `0x2000` | end | `DoSaveWhenEnd` |
+| `0x4000` | pause | `IsDisableLoadingPause` |
+| `0x8000` | err | `IsNoDispErrorForTemporarySave` |
+
+So `0x14c8`, as read with `MiniGame_TimeStop` applied, shows as **on save warp grab time**. Any other bit shows as
+a number after the words. Both watches only read; the wrench opens the value in **debug > memory**.
 
 **timer**: **start/stop timer**, **reset timer**, **reset lag counter** (also shortcuts,
 [1.3](#13-shortcuts-in-the-game)). **reset jump height** is under its own heading, below.

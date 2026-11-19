@@ -9,6 +9,7 @@
 #include "input.h"
 #include "lang.h"
 #include "link.h"
+#include "safety.h"
 #include "sys.h"
 #include "z64hd.h"
 
@@ -21,6 +22,7 @@ float hypotf(float x, float y);
 const char *const watch_labels[W_COUNT] = {
   "x", "y", "z", "facing", "move angle", "speed", "y speed", "camera angle", "camera pitch",
   "camera dist", "input", "stick", "lag", "timer", "frame", "map", "air wall", "jump height",
+  "safety", "safety flags",
 };
 const char *const watches_corner_names[GFX_NPLACES] = { "top-left", "top-right", "bottom-left", "bottom-right",
                                                        "top-centre", "bottom-centre", "custom" };
@@ -467,30 +469,32 @@ static const struct { uint32_t bit; const char *name; } button_names[] = {
 
 /* --- display types (gz's watch types, per watch: what suits its value) ---------------------- */
 
-typedef enum { DK_TEXT, DK_FLOAT, DK_ANGLE, DK_COUNT, DK_TIMER, DK_STICK, DK_F32 } dkind_t;
+typedef enum { DK_TEXT, DK_FLOAT, DK_ANGLE, DK_COUNT, DK_TIMER, DK_STICK, DK_F32, DK_FLAGS } dkind_t;
 
 static const dkind_t kind_of[W_COUNT] = {
   [W_X] = DK_FLOAT, [W_Y] = DK_FLOAT, [W_Z] = DK_FLOAT, [W_FACING] = DK_ANGLE, [W_MOVE_ANGLE] = DK_ANGLE,
   [W_SPEED] = DK_FLOAT, [W_Y_SPEED] = DK_FLOAT, [W_CAMERA_ANGLE] = DK_ANGLE, [W_CAMERA_PITCH] = DK_ANGLE,
   [W_CAMERA_DIST] = DK_FLOAT, [W_INPUT] = DK_TEXT, [W_STICK] = DK_STICK, [W_LAG] = DK_COUNT,
   [W_TIMER] = DK_TIMER, [W_FRAME] = DK_COUNT, [W_MAP] = DK_TEXT, [W_AIRWALL] = DK_TEXT,
-  [W_JS_HEIGHT] = DK_F32,
+  [W_JS_HEIGHT] = DK_F32, [W_SAFETY] = DK_TEXT, [W_SAFETY_FLAGS] = DK_FLAGS,
 };
 
 /* Each kind's types, in the order of its names below. A float: decimal (f32), whole number (s32) or the
  * float's bits (x32). An angle: degrees, the game's 16-bit angle (0x4000 = 90 degrees) as N64 OoT shows
- * it, the same signed, or radians. */
+ * it, the same signed, or radians. Flags: the bits, or a word for each one set. */
 enum { FLOAT_AS_F32, FLOAT_AS_S32, FLOAT_AS_X32, N_FLOAT_TYPES };
 enum { ANGLE_AS_DEG, ANGLE_AS_HEX, ANGLE_AS_S16, ANGLE_AS_RAD, N_ANGLE_TYPES };
 enum { COUNT_AS_DEC, COUNT_AS_HEX, N_COUNT_TYPES };
 enum { TIMER_AS_MIN_SEC, TIMER_AS_SEC, N_TIMER_TYPES };
 enum { STICK_AS_PERCENT, STICK_AS_RAW, N_STICK_TYPES };
+enum { FLAGS_AS_HEX, FLAGS_AS_WORDS, N_FLAGS_TYPES };
 
 static const char *const names_float[N_FLOAT_TYPES] = { "f32", "s32", "x32" };
 static const char *const names_angle[N_ANGLE_TYPES] = { "deg", "hex", "s16", "rad" };
 static const char *const names_count[N_COUNT_TYPES] = { "dec", "hex" };
 static const char *const names_timer[N_TIMER_TYPES] = { "m:s", "sec" };
 static const char *const names_stick[N_STICK_TYPES] = { "%", "raw" };
+static const char *const names_flags[N_FLAGS_TYPES] = { "hex", "flags" };
 
 #define ANGLE_UNITS_PER_TURN 65536.0f /* the game's binary angles */
 
@@ -505,6 +509,7 @@ const char *const *watch_type_names(watch_t watch, int *n)
     case DK_COUNT: *n = N_COUNT_TYPES; return names_count;
     case DK_TIMER: *n = N_TIMER_TYPES; return names_timer;
     case DK_STICK: *n = N_STICK_TYPES; return names_stick;
+    case DK_FLAGS: *n = N_FLAGS_TYPES; return names_flags;
     default: *n = 0; return 0;
   }
 }
@@ -683,6 +688,24 @@ void watch_text(watch_t watch, char *buf, int len)
         snprintf(buf, len, "N/A");
       break;
     }
+    case W_SAFETY: case W_SAFETY_FLAGS: {
+      uint16_t flags;
+      uint32_t name_hash;
+      if (!safety_state(&flags, &name_hash)) {
+        snprintf(buf, len, "N/A");
+      } else if (watch == W_SAFETY) { /* the setting applied: its name, or its hash if it's not a known one */
+        const char *name = safety_setting_name(name_hash);
+        if (name)
+          snprintf(buf, len, "%s", name);
+        else
+          snprintf(buf, len, "0x%08x", (unsigned)name_hash);
+      } else if (type == FLAGS_AS_WORDS) {
+        safety_flags_text(flags, buf, len);
+      } else {
+        snprintf(buf, len, "0x%04x", (unsigned)flags);
+      }
+      break;
+    }
     default:
       break;
   }
@@ -783,6 +806,7 @@ bool watch_entry_has_address(const watch_entry_t *entry)
   switch (entry->id) {
     case W_MEMORY: case W_X: case W_Y: case W_Z: case W_FACING: case W_Y_SPEED: case W_CAMERA_ANGLE:
     case W_CAMERA_PITCH: case W_CAMERA_DIST: case W_FRAME: case W_MAP: case W_JS_HEIGHT:
+    case W_SAFETY: case W_SAFETY_FLAGS:
       return true;
     default:
       return false;
@@ -827,6 +851,13 @@ bool watch_entry_address(const watch_entry_t *entry, uintptr_t *addr, int *mw_ty
     case W_JS_HEIGHT:
       found = js_height_addr();
       break;
+    case W_SAFETY: case W_SAFETY_FLAGS: { /* the setting's name hash (u32), the flags (u16) */
+      uintptr_t flags_addr, hash_addr;
+      if (safety_addresses(&flags_addr, &hash_addr))
+        found = entry->id == W_SAFETY ? hash_addr : flags_addr;
+      type = entry->id == W_SAFETY ? MW_X32 : MW_X16;
+      break;
+    }
     default:
       return false;
   }

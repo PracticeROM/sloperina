@@ -41,6 +41,13 @@ one-shot reset, lock/unlock, read-only/unavailable targets, exact four-byte writ
 It also draws a real menu and checks that invisible panel-sizing markers do not become lock icons.
 The game and SD filesystem are mocked; this does not verify the game's setter/check ordering.
 
+### Safety watch host tests
+
+`python tests/run_safety.py --cc C:/msys64/mingw64/bin/gcc.exe` runs `safety.c` over a mocked main,
+scene and GameSafetyMgr. It checks that each of the 28 setting names hashes to its table entry, the
+flag words, finding the manager by its name getter at entry 28 and elsewhere, scene changes, and
+that missing, unmapped or implausible chains give N/A. It does not read the game.
+
 ### Levitation host tests
 
 `python tests/run_levitate.py --cc C:/msys64/mingw64/bin/gcc.exe` runs the real levitation step/frame
