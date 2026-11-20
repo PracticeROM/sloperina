@@ -24,6 +24,7 @@
 #include "savepos.h"
 #include "voidmap.h"
 #include "ragdoll.h"
+#include "hsstore.h"
 #include "eventskip.h"
 #include "link.h"
 #include "menu.h"
@@ -185,6 +186,10 @@ static void set_lock_y(menu_item_t *it, bool on) { set_lock_axis(LOCK_Y, on); }
 static void set_lock_z(menu_item_t *it, bool on) { set_lock_axis(LOCK_Z, on); }
 static bool get_ragdoll(menu_item_t *it) { return ragdoll_active(); }
 static void set_ragdoll(menu_item_t *it, bool on) { ragdoll_set(on); }
+static bool get_hs_force(menu_item_t *it) { return hsstore_force_enabled(); }
+static void set_hs_force(menu_item_t *it, bool on) { hsstore_force_set(on); }
+static bool get_hs_shown(menu_item_t *it) { return hsstore_shown; }
+static void set_hs_shown(menu_item_t *it, bool on) { hsstore_shown = on; }
 
 #define QUARTERS_PER_HEART 4
 #define F_MAX_HEARTS 0xFBE01DA1u /* quarter hearts (game.py INT_HASH) */
@@ -383,6 +388,12 @@ static void text_age(menu_item_t *it, char *buf, int len)
   snprintf(buf, len, TF("current age: %s"), T(age == AGE_ADULT ? "adult" : age == AGE_CHILD ? "child" : "-"));
 }
 
+static void text_hs_storage(menu_item_t *it, char *buf, int len)
+{
+  int have = hsstore_have();
+  snprintf(buf, len, TF("hookshot storage: %s"), T(have > 0 ? "yes" : have == 0 ? "no" : "-"));
+}
+
 /* the map as the warps menu names it, with the age */
 static void text_map(menu_item_t *it, char *buf, int len)
 {
@@ -456,6 +467,12 @@ static void build_link(void)
     ragdoll->hint = "knock Link over, as a bomb does; he gets up by himself";
     ragdoll->log_label = "ragdoll:";
   }
+  menu_item_t *hs_force = menu_add_check(&m_link, "force hookshot storage", get_hs_force, set_hs_force, 0);
+  if (hs_force)
+    hs_force->hint = "a bomb's medium hit the moment a hookshot shot starts (1.0)";
+  menu_item_t *hs_shown = menu_add_check(&m_link, "show hookshot hook", get_hs_shown, set_hs_shown, 0);
+  if (hs_shown)
+    hs_shown->hint = "gold box: the hook out; grey cross: where a hook was put away; red: the shot's aim";
   menu_add_return(&m_link);
   /* what can only be read, under return after a blank line */
   add_blank_line(&m_link);
@@ -465,6 +482,7 @@ static void build_link(void)
   menu_end_group(&m_link);
   menu_add_text(&m_link, text_age, 0);
   menu_add_text(&m_link, text_map, 0);
+  menu_add_text(&m_link, text_hs_storage, 0);
 }
 
 /* --- warps ------------------------------------------------------------------------------------- */

@@ -63,6 +63,9 @@ static const gpu_colour_t line_colours[AW_NCOLORS] = {
   [AW_VOID_AREA] = { 0.72f, 0.36f, 1.0f, 1 },    /* purple: an area that voids Link inside it */
   [AW_OCARINA] = { 0.10f, 0.60f, 0.25f, 1 },   /* dark green: slot B if the ocarina were put away (savepos.c) */
   [AW_OCARINA_LOAD] = { 1.0f, 1.0f, 0.70f, 1 },   /* pale yellow: where a load puts Link from it */
+  [AW_HOOK] = { 1.0f, 0.86f, 0.12f, 1 },          /* gold: the hookshot's hook out (hsstore.c) */
+  [AW_HOOK_IDLE] = { 0.62f, 0.62f, 0.62f, 1 },    /* grey: a hook put away, where it was left */
+  [AW_HOOK_AIM] = { 1.0f, 0.32f, 0.30f, 1 },      /* red: the shot's start and aimed spot */
 };
 
 /* budget: the quads the lines may take. Short of them, the glows go first, then the farthest lines. */

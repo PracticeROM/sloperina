@@ -98,8 +98,10 @@ have none at first.
 | **save position (R + d-up)** | Remembers where Link is, which way he faces and the map (gz's save position). The first save in an area only finds Link's position in memory ("Locating Link's starting position, please try again"; he's lifted a little while it's tested, as with levitate, and it's quicker while he's moving): press it again once it says it's found him. |
 | **load position (R + d-down)** | Puts Link back there, facing the same way. Only in the same map. With nothing saved: "No position saved yet". |
 | **ragdoll (R3)** | Knocks Link over and tumbles him backwards: the game's own reaction to a bomb, so he can't attack and doesn't sink while it lasts. He gets up by himself and it unticks then; it can't be cut short. When the game wouldn't take a hit (a map's arrival, an event) it says so and does nothing. On 1.1.1 the game caps the tumble's speed; 1.0 has no cap. |
+| **force hookshot storage** | Gives hookshot storage on purpose: the moment a hookshot or longshot shot starts, Link takes a bomb's medium hit, which cancels the shot before the hook flies. The next shot then skips flying and pulls Link straight towards the spot the cancelled shot aimed at, through walls if it was behind one (on another map it crashes the game). Says "hookshot storage" when it worked. A shot that uses storage isn't hit, so it can be used with this ticked. 1.0 only (on 1.1.1 the game lets go when nothing real is hooked). |
+| **show hookshot hook** | Draws the hookshot in the world, through walls. **Gold** box: the hook while it's out, with a gold line (the chain) from Link's hand. **Grey** cross: where a hook was put away. **Red**: a line from where the shot started to the spot it aimed at, with a cross there, while a shot runs or while storage holds it: that's where a stored shot pulls Link to. |
 
-Under **return**: Link's **position** (x, y, z), his **current age** and the **map**.
+Under **return**: Link's **position** (x, y, z), his **current age**, the **map** and whether he has **hookshot storage** (yes / no; - without a hookshot).
 
 ### 2.2 Warps
 

@@ -1405,3 +1405,35 @@ reads every slot's caption once, at boot, and keeps it.
   These runs used the console fork with the same reload-controller changes and address mappings.
   Master Quest was covered by the host/native-reset checks, not a confirmed console run.
   No new Lichii or 1.1.1 runtime test is claimed.
+
+### 9.12 Hookshot storage (1.0.0; read live in Lichii)
+- **The record:** Link's AI component `A = [[actor+0x270]+0x3D8]` keeps a small hash map: buckets at `[A+0x20]`
+  (0x38 bytes each: `+0x00` key, `+0x08` count, `+0x10` pointer to the records, 0xF8 bytes each), bucket count at
+  `A+0x2C`. The longshot's record has key `0xAD28A0F2`, the hookshot's `0x9472DF51` (`main+0x2DAC3C0`, the code
+  behind `QueryEquipmentUserTryGetHookshotHookState`, reads the current weapon's). In it:
+  - `+0xA0` vec3: where the shot started (Link's hand); `+0xAC` vec3: the spot it aimed at, worked out again on
+    every shot.
+  - `+0xD8` u8: 1 while a hookshot action runs. `+0xDE` u8: the hook state: 0 idle, 2 flying out, 3 hooked and
+    pulling, 4 coming back after a miss. `+0xE0` u8: ready; cleared as a shot starts, set again when it ends.
+- **Storage:** a hit on the shot's first frame (a bomb's `DamageM`) ends the action before the hook flies (`+0xDE`
+  never leaves 0) and before `+0xE0` is set again. The next shot goes 0 → 3 without flying and pulls Link towards
+  the left-over `+0xAC`. `+0xE0` clear alone isn't storage: a normal shot that ends on a climbable net leaves it
+  clear too, so the mod tells storage by a shot whose hook state never left 0.
+- **Forcing it** (`hsstore.c`): on the frame `+0xD8` goes 0 → 1 with the state still 0, the mod writes the words a
+  real bomb's `DamageM` left in Link's hit component `[actor+0x270]+0x2B8` (recorded live; frame numbers made
+  current, the bomb put in front of Link). The level byte `+0x2D1` alone (2 = medium) isn't enough: the reaction
+  also reads the hit's contact records (lists at `+0x210` and `+0x1338`).
+- **The hook** is an actor named `Shootable_Hook` in the actor tree (9.5): state at `+0x2C` (4 or 5 out, 6 put
+  away), position at `+0x31C`.
+- **What a stored shot does depends on the wall it meets:**
+  - **Pull** (state 0 → 3): the hook glides out to the aimed spot and Link is pulled there.
+  - **Dink:** the game runs it as a normal shot (0 → 2) and the hook bounces off within a frame or two (the mod
+    logs it as "fake"). What decides pull or dink isn't known yet.
+  - **Clip through a climbable wall or ladder:** the hook can stop about 0.2 behind the wall's face. The pull
+    ends in front of it, but the climb then snaps Link to the hook's depth, behind the face; he lets go and falls
+    behind the wall. Hookshot targets have no climb, so they don't clip.
+- **1.1.1:** while pulling, it checks every frame that a real object is hooked and ends the shot cleanly if not.
+  So a stored shot should just let go there (from the code, not tried in game).
+- **Levitating with through walls off** also gives storage, without a hit: levitate holds Link still with
+  collision on, the physics reports him standing on something (`[[actor+0x270]+0x358]+0x13D0` bit 0) but not
+  grounded (bit 2), so items work in the air and a hookshot shot is cancelled on its first frame.

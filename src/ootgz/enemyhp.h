@@ -21,6 +21,9 @@ typedef struct {
 
 /* actors.c: the enemies in the scene, up to max */
 int enemies_read(enemy_t *out, int max);
+/* actors.c: the actors with this name ("Shootable_Hook"), any state, up to max; their state is at +0x2C, their
+ * position at +0x31C */
+int actors_named(const char *name, uintptr_t *out, int max);
 
 /* the colours of the rectangles (nvn.c) */
 enum { EH_BACK, EH_FILL, EH_LOW, EH_TEXT, EH_NCOLORS };

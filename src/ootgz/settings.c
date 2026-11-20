@@ -7,6 +7,7 @@
  *   opacity=0..100             arrival_cutscenes=0|1      levitate=0|1      levitate_speed=<units/s>
  *   menu_style=0 (the game's type; gz's pixel font, 1, is no longer offered: a 1 is read as 0)
  *   flag_log=0|1, flag_log_player_status=0|1, flag_log_story=0|1 (the flag log's three files, flaglog.h)
+ *   hookshot_hook_shown=0|1 (draw the hookshot's hook and aim, hsstore.h)
  *   hide_in_game_menus=0|1 (no watches, input display or log while the game's pause screen or map is open)
  *   hide_over_item_wheel=0|1 (the same while its item wheel is up)
  *   save_backups=0|1 (copy the game's save folder to the SD card after every save, savebackup.h)
@@ -39,6 +40,7 @@
 #include "airwall.h"
 #include "savepos.h"
 #include "voidmap.h"
+#include "hsstore.h"
 #include "flaglog.h"
 #include "savebackup.h"
 #include "binds.h"
@@ -139,6 +141,7 @@ typedef struct {
   int32_t flag_log;
   int32_t flag_log_status;
   int32_t flag_log_story;
+  int32_t hook_shown;
   uint32_t binds[CMD_COUNT]; /* binds.h */
   char archive_folder[SAVE_FOLDER_LEN]; /* where archive now puts them (savebackup.h) */
 } snapshot_t;
@@ -227,6 +230,7 @@ static snapshot_t take_snapshot(void)
   s.flag_log = flaglog_enabled;
   s.flag_log_status = flaglog_status_enabled;
   s.flag_log_story = flaglog_story_enabled;
+  s.hook_shown = hsstore_shown;
   return s;
 }
 
@@ -327,6 +331,7 @@ static void apply_snapshot(const snapshot_t *s)
   flaglog_enabled = s->flag_log != 0;
   flaglog_status_enabled = s->flag_log_status != 0;
   flaglog_story_enabled = s->flag_log_story != 0;
+  hsstore_shown = s->hook_shown != 0;
 }
 
 /* --- reading the file ------------------------------------------------------------------------- */
@@ -428,6 +433,7 @@ static const struct { const char *key; size_t field_offset; } int_keys[] = {
   INT_KEY("flag_log", flag_log),
   INT_KEY("flag_log_player_status", flag_log_status),
   INT_KEY("flag_log_story", flag_log_story),
+  INT_KEY("hookshot_hook_shown", hook_shown),
 };
 #define N_INT_KEYS (sizeof(int_keys) / sizeof(*int_keys))
 
@@ -655,14 +661,14 @@ static void save_settings_file(const snapshot_t *s)
                   "input_display=%d\ninput_display_background=%d\ninput_display_parts=%d\n"
                   "input_display_style=%d\ninput_display_size=%d\ninput_display_position=%d\n"
                   "input_display_x=%d\ninput_display_y=%d\nmenu_style=%d\nhide_in_game_menus=%d\nhide_over_item_wheel=%d\nsave_backups=%d\nsave_backup_location=%d\nsave_backup_kinds=%d\nflag_log=%d\n"
-                  "flag_log_player_status=%d\nflag_log_story=%d\n",
+                  "flag_log_player_status=%d\nflag_log_story=%d\nhookshot_hook_shown=%d\n",
                   s->lang, (int)s->frame_advance, (int)s->frame_advance_in_pause, (int)s->pause_display,
                   (int)s->menu_scale, (int)s->input_display, (int)s->input_display_bg, (int)s->input_parts,
                   (int)s->input_style, (int)s->input_size, (int)s->input_position, (int)s->input_x,
                   (int)s->input_y, (int)s->menu_style, (int)s->hide_in_game_menus, (int)s->hide_over_item_wheel,
                   (int)s->save_backups, (int)s->save_backup_location,
                   (int)s->save_backup_kinds, (int)s->flag_log,
-                  (int)s->flag_log_status, (int)s->flag_log_story);
+                  (int)s->flag_log_status, (int)s->flag_log_story, (int)s->hook_shown);
   if (n < (int)sizeof(buf))
     n += snprintf(buf + n, sizeof(buf) - n,
                   "voids_shown=%d\nvoids_ground=%d\nvoids_deadly=%d\nvoids_ring=%d\n"

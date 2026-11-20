@@ -101,6 +101,7 @@ static int actor_life(uintptr_t actor, int32_t *life, int32_t *max)
 /* --- the walk ------------------------------------------------------------------------------------ */
 
 static struct {
+  void (*visit)(uintptr_t actor); /* use_actor, or find_named's */
   enemy_t *out;
   float distance_sq[64]; /* each out[i]'s from Link, to keep the nearest when out is full */
   int max, n;
@@ -220,7 +221,7 @@ static void walk_tree(uintptr_t root)
         break;
       uintptr_t actor = *(uintptr_t *)(entry + ENTRY_ACTOR);
       if (actor)
-        use_actor(actor);
+        walk.visit(actor);
     }
     node = *(uintptr_t *)(node + NODE_RIGHT);
   }
@@ -269,6 +270,7 @@ int enemies_read(enemy_t *out, int max)
   walk.max = max < (int)(sizeof(walk.distance_sq) / sizeof(walk.distance_sq[0])) ? max :
              (int)(sizeof(walk.distance_sq) / sizeof(walk.distance_sq[0]));
   walk.n = walk.visits = walk.actors = walk.with_life = walk.enemies = walk.n_skipped = 0;
+  walk.visit = use_actor;
   walk.link = link_actor();
   if (!link_drawn_pos(&walk.link_pos))
     return 0;
@@ -277,3 +279,40 @@ int enemies_read(enemy_t *out, int max)
   return walk.n;
 }
 
+/* --- actors by name ------------------------------------------------------------------------------ */
+
+static struct {
+  const char *name;
+  uintptr_t *out;
+  int max, n;
+} named;
+
+static bool same_name(const char *a, const char *b)
+{
+  for (; *a && *a == *b; a++, b++)
+    ;
+  return *a == *b;
+}
+
+static void find_named(uintptr_t actor)
+{
+  if (named.n >= named.max || !readable(actor, ACTOR_POS + 12))
+    return;
+  uintptr_t name = *(uintptr_t *)(actor + ACTOR_NAME);
+  if (name && sys_mapped(name, 32, SYS_PERM_R) && same_name((const char *)name, named.name))
+    named.out[named.n++] = actor;
+}
+
+int actors_named(const char *name, uintptr_t *out, int max)
+{
+  if (!z64hd_game || !z64hd_game->actor_mgr_ptr)
+    return 0;
+  uintptr_t mgr = sys_ptr(MAIN(z64hd_game->actor_mgr_ptr));
+  if (!readable(mgr + MGR_TREE_ROOT, 8))
+    return 0;
+  named.name = name, named.out = out, named.max = max, named.n = 0;
+  walk.visits = 0;
+  walk.visit = find_named;
+  walk_tree(*(uintptr_t *)(mgr + MGR_TREE_ROOT));
+  return named.n;
+}

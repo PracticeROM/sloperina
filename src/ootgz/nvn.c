@@ -1373,6 +1373,9 @@ static const float airwall_colours[AW_NCOLORS][4] = {
   [AW_VOID_AREA] = { 0.70f, 0.34f, 1.0f, 1.0f },    /* purple: an area that voids Link inside it */
   [AW_OCARINA] = { 0.08f, 0.58f, 0.22f, 1.0f },  /* dark green: slot B if the ocarina were put away (savepos.c) */
   [AW_OCARINA_LOAD] = { 1.0f, 1.0f, 0.68f, 1.0f },   /* pale yellow: where a load puts Link from it */
+  [AW_HOOK] = { 1.0f, 0.85f, 0.10f, 1.0f },         /* gold: the hookshot's hook out (hsstore.c) */
+  [AW_HOOK_IDLE] = { 0.60f, 0.60f, 0.60f, 1.0f },   /* grey: a hook put away, where it was left */
+  [AW_HOOK_AIM] = { 1.0f, 0.30f, 0.30f, 1.0f },     /* red: the shot's start and aimed spot */
 };
 
 /* enemy health (enemyhp.c) */

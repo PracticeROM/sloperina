@@ -17,7 +17,7 @@ extern bool airwalls_xray;  /* also where Link is in front of them (else hidden 
  * thinner than the line width (a dot, or a straight piece of a line) is widened to it when drawn. */
 /* slots, ocarina and load: savepos.c's; void: voidmap.c's */
 enum { AW_BLOCKS, AW_INSIDE, AW_OTHER, AW_PUSHES, AW_SLOT_A, AW_SLOT_B, AW_LOAD, AW_OCARINA, AW_OCARINA_LOAD,
-       AW_VOID_GROUND, AW_VOID_DEADLY, AW_VOID_RING, AW_VOID_AREA, AW_NCOLORS };
+       AW_VOID_GROUND, AW_VOID_DEADLY, AW_VOID_RING, AW_VOID_AREA, AW_HOOK, AW_HOOK_IDLE, AW_HOOK_AIM, AW_NCOLORS }; /* hooks: hsstore.c's */
 typedef struct { uint16_t x0, y0, x1, y1; uint8_t color; } aw_dot_t;
 
 /* the same outlines as lines, for the GPU (the game's style): ends 0..1 across the visible picture, the

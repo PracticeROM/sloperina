@@ -15,6 +15,7 @@
 
 #include "data.h"
 #include "gamedata.h"
+#include "hsstore.h"
 #include "age.h"
 #include "link.h"
 #include "lang.h"
@@ -776,7 +777,7 @@ void airwall_frame(bool gpu)
   n_air_walls_near = 0;
   link_boxes[f].ok = false;
   bool walls = (airwalls_shown || void_areas_shown()) && current_map;
-  bool draw = (walls || savepos_shown || voidmap_shown) && !game_is_paused();
+  bool draw = (walls || savepos_shown || voidmap_shown || hsstore_shown) && !game_is_paused();
   view_cam_t cam;
   if (draw && view_camera(&cam)) {
     /* the save position's markers (savepos.c) first: a few lines the walls' budget never cuts */
@@ -785,6 +786,13 @@ void airwall_frame(bool gpu)
     int n_marks = savepos_lines(mark_ends, mark_colours, SAVEPOS_MAX_LINES);
     for (int i = 0; i < n_marks; i++)
       add_edge_dots(dots[f], &n, gpu ? lines[f] : 0, &nl, &cam, mark_ends[i][0], mark_ends[i][1], mark_colours[i],
+                    false);
+    /* the hookshot's hook and aim (hsstore.c) */
+    static float hook_ends[HSSTORE_MAX_LINES][2][3];
+    static uint8_t hook_colours[HSSTORE_MAX_LINES];
+    int n_hook = hsstore_lines(hook_ends, hook_colours, HSSTORE_MAX_LINES);
+    for (int i = 0; i < n_hook; i++)
+      add_edge_dots(dots[f], &n, gpu ? lines[f] : 0, &nl, &cam, hook_ends[i][0], hook_ends[i][1], hook_colours[i],
                     false);
     /* then where Link voids (voidmap.c), its nearest lines */
     int n_void = voidmap_lines(void_ends, void_colours, VOIDMAP_MAX_LINES);
