@@ -24,6 +24,7 @@
 #include "savepos.h"
 #include "voidmap.h"
 #include "ragdoll.h"
+#include "tpose.h"
 #include "eventskip.h"
 #include "link.h"
 #include "menu.h"
@@ -185,6 +186,8 @@ static void set_lock_y(menu_item_t *it, bool on) { set_lock_axis(LOCK_Y, on); }
 static void set_lock_z(menu_item_t *it, bool on) { set_lock_axis(LOCK_Z, on); }
 static bool get_ragdoll(menu_item_t *it) { return ragdoll_active(); }
 static void set_ragdoll(menu_item_t *it, bool on) { ragdoll_set(on); }
+static bool get_tpose(menu_item_t *it) { return tpose_enabled(); }
+static void set_tpose(menu_item_t *it, bool on) { tpose_set(on); }
 
 #define QUARTERS_PER_HEART 4
 #define F_MAX_HEARTS 0xFBE01DA1u /* quarter hearts (game.py INT_HASH) */
@@ -456,6 +459,9 @@ static void build_link(void)
     ragdoll->hint = "knock Link over, as a bomb does; he gets up by himself";
     ragdoll->log_label = "ragdoll:";
   }
+  menu_item_t *tpose = menu_add_check(&m_link, "bomb t-pose", get_tpose, set_tpose, 0);
+  if (tpose)
+    tpose->hint = "the ocarina breath glitch: Link t-poses running with a bomb; untick also clears the real one";
   menu_add_return(&m_link);
   /* what can only be read, under return after a blank line */
   add_blank_line(&m_link);

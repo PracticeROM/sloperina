@@ -1405,3 +1405,39 @@ reads every slot's caption once, at boot, and keeps it.
   These runs used the console fork with the same reload-controller changes and address mappings.
   Master Quest was covered by the host/native-reset checks, not a confirmed console run.
   No new Lichii or 1.1.1 runtime test is claimed.
+
+### 9.13 The ocarina breath T-pose
+- **Symptom:** after holding one ocarina note for 3-5 s, Link's arms T-pose whenever he runs holding a bomb. Not
+  standing still. Idle fidgets, attacks, a boots change or reloading clear it.
+- **Link's AS** (`romfs/AS/Player_Child.root.asb`, `Player_Adult`; version 0x41B, string pool at the header's word
+  14) blends 9 layers (slots, header words 8/9, 0x10 bytes each: name, default bone group): Lower, Upper, RightArm,
+  LeftArm, Face, Finger, Mouth, MaskChange, MaskEquip. 16 bone groups (header words 21/22, 0xC bytes: entries'
+  offset, name, count; each entry a bone name and u16 0 in / 1 out, children included). Commands are 0x30 bytes
+  from 0x80 (name first, node index last); nodes 0x24 bytes from 0x58D0 (u16 type, body offset at +8); type 3 plays
+  an animation, type 27 is the node the breath's clip sits under (its label: "ocarina performance (includes Face and
+  Spine) [for breathing]").
+- **Cause:** a held note plays the command `DemoOcarinaBreath` in the Face layer (the player component P keeps the
+  layer's index at P`+0xFEC` = 4; `main+0xA2CD98` compares the playing command's name with it). That switches
+  the Face layer's bone mask from `Face_NoMouth` (Root out, Face_Root in, Mouth_Root out) to `OcarinaBreath` (Root
+  out, Spine_2 in, Weapon_L/R and the ten finger roots out): the whole upper body. It happens on every breath, not
+  only when the ocarina is cancelled during one. Nothing on the way out of the ocarina sets it back. Only Face
+  animations that name their own group do: idle fidgets (`VoiceServic*`), `CutS1`, `BootsChange`, events.
+  Until then the Face layer drives Link's chest and arms, and while he runs with a bomb, his arms are in bind pose.
+- **Where the mask is:** slots S = `[[[[actor+0x270]+0x40]+0x18]+0x18]` (count S`+0x18`, entries S`+0x20` of 0x48
+  bytes; the first qword is the slot's object O, `[O+0x10]` the playing command's name). Each O has a mask
+  table T = `[O+0x17198]` (= O`+0x17238`), which holds the mask of the *next* layer (entry 3 holds Face's). I =
+  `[T+8]` (vtable `main+0x4C12FD8`; T's is `main+0x4B48D68`, a generic wrapper): I`+8` capacity, `[I+0x10]` one
+  byte per entry (0x80 in, 0x83 out), I`+0x1C` a count, `[I+0x28]` u32 entries with the skeleton bone index in
+  the top 16 bits. Bone indices are the bfres skeleton's order (`romfs/Model/Player_Adult.Player_Adult.bfres`,
+  FSKL: bone array at +0x10, 0x58 bytes a bone, name first): adult Root 0, Spine_2 0x06, Weapon_L 0x12, Weapon_R
+  0x42, Face_Root 0x6B, Mouth_Root 0x89; child Spine_2 0x0B, Weapon_L 0x17, Face_Root 0x6B, Mouth_Root 0x8D.
+  The same slot walk is in 1.0.0 (`main+0x5754D4`, same offsets).
+- **Fix / feature:** `tpose.c` (link > bomb t-pose) writes entry 1 of the Face table as Spine_2 every frame (the
+  game rebuilds the table on its next mask change; a single write lasted about a second). Unticking writes
+  Face_Root back. It finds the table by its contents (entry 0 Root out, entry 1 Face_Root or Spine_2 in), so the
+  slot it sits in doesn't matter. Face_Root is 0x6B in both skeletons, so the age comes from `age_current`.
+  `Face_NoMouth` uses only 2 entries (I`+0x1C` = 2): the Mouth_Root seen in entry 2 is left over past the count,
+  and the game doesn't rewrite it. The first build matched on entries 1 and 2 together. After the game put entry 1
+  back and left entry 2 at Weapon_L, nothing matched, so it stopped writing ("tpose: no Face mask table found").
+- **Not checked:** child Link (indices from the child bfres, assumed to match as they do for adult), 1.0.0, and
+  which Face animation leaves the arms in bind pose while running.
