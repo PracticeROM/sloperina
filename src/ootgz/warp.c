@@ -32,6 +32,7 @@
 
 bool warp_arrival_cutscenes;
 
+static bool silent_arrival;
 static const warp_map_t *target_map;
 static const spawn_t *target_spawn;
 static enum {
@@ -68,9 +69,15 @@ static const char *arrival_event(const spawn_t *spawn)
 }
 
 /* After the game has reserved our map: what the event's own reservation got wrong for spawns
- * without a starter (Dm_SY_BancChangeGo always names the spawn as the starter). */
+ * without a starter (Dm_SY_BancChangeGo always names the spawn as the starter), or when a memfile
+ * requests silent arrival without any arrival event/camera. */
 static void fix_reservation(const spawn_t *spawn)
 {
+  if (silent_arrival) {
+    gd_set_str(GD_STR_STARTER, "");
+    gd_set_str(GD_STR_EVENT, "");
+    return;
+  }
   if (spawn->starter)
     return;
   gd_set_str(GD_STR_STARTER, "");
@@ -211,7 +218,9 @@ void warp_arm(const warp_map_t *map, const spawn_t *spawn)
 {
   if (state == WARP_ARMED)
     state = WARP_CANCELLED;
+  silent_arrival = false;
   if (request_warp_event(map, spawn)) {
+    gd_set_str(GD_STR_NEXT_MAP, "");
     target_map = map;
     target_spawn = spawn;
     state = WARP_REQUESTED;
@@ -223,10 +232,29 @@ void warp_arm(const warp_map_t *map, const spawn_t *spawn)
   arm_exit_swap(map, spawn);
 }
 
+bool warp_arm_silent(const warp_map_t *map, const spawn_t *spawn)
+{
+  if (state == WARP_ARMED)
+    state = WARP_CANCELLED;
+  silent_arrival = true;
+  if (request_warp_event(map, spawn)) {
+    gd_set_str(GD_STR_NEXT_MAP, "");
+    target_map = map;
+    target_spawn = spawn;
+    state = WARP_REQUESTED;
+    deadline_frame = frame_counter() + REQUEST_TIMEOUT_FRAMES;
+    log_printf("warp: requested Dm_SY_BancChangeGo to %s / %s (silent)", map->name, spawn->pos);
+    return true;
+  }
+  silent_arrival = false;
+  return false;
+}
+
 void warp_cancel(void)
 {
   if (state == WARP_ARMED || state == WARP_REQUESTED) {
     state = WARP_CANCELLED;
+    silent_arrival = false;
     gfx_notice("warp cancelled");
   } else {
     gfx_notice("no warp armed");
@@ -243,10 +271,19 @@ static void wait_for_reservation(void)
   if (next && str_equal(next, target_map->name)) {
     fix_reservation(target_spawn);
     state = WARP_DONE;
-    log_printf("warp: the game reserved %s%s", next, target_spawn->starter ? "" : " (no starter: warp-song arrival)");
+    log_printf("warp: the game reserved %s%s", next,
+               silent_arrival ? " (silent arrival)" : /* not menu text */
+               target_spawn->starter ? "" : " (no starter: warp-song arrival)"); /* not menu text */
+    silent_arrival = false;
   } else if (deadline_passed()) {
-    log_printf("warp: the event didn't start; falling back to the next exit");
-    arm_exit_swap(target_map, target_spawn);
+    if (silent_arrival) {
+      silent_arrival = false;
+      state = WARP_TIMED_OUT;
+      log_printf("warp: silent reservation timed out");
+    } else {
+      log_printf("warp: the event didn't start; falling back to the next exit");
+      arm_exit_swap(target_map, target_spawn);
+    }
   }
 }
 
@@ -284,6 +321,7 @@ void warp_frame(void)
 }
 
 bool warp_pending(void) { return state == WARP_ARMED || state == WARP_REQUESTED; }
+bool warp_requested(void) { return state == WARP_REQUESTED || state == WARP_DONE; }
 bool warp_abandoned(void) { return state == WARP_CANCELLED || state == WARP_TIMED_OUT; }
 
 const char *warp_state(void)

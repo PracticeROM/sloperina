@@ -13,5 +13,9 @@ int age_wanted(void);    /* what the next reload gives (the game's until the swi
 void age_want(int age);
 void age_frame(void);      /* frame hook, after warp_frame */
 void age_reload_map(void); /* reload the map at the start point Link last arrived at, at age_wanted */
+/* Load map `name` (any age's version, as named) at `last_start` with silent arrival (no arrival event or
+ * camera), without altering the current age (memfile.c loads the snapshot's GameData). False if no start point
+ * is known or the game refused the warp request immediately. */
+bool age_warp_to_silent(const char *name, const char *last_start, bool have_pos);
 
 #endif

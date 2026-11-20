@@ -285,6 +285,40 @@ bool cct_noclip_move(const vec3f_t *position)
   return true;
 }
 
+/* The controller's rotation setter: its vtable's slot after the position setter's (OneShotCctChangeRotation calls
+ * +0x110 with a Mat33F, the position node +0xE8; 1.0.0 main+0x65EE00, 1.1.1 main+0x6B8910). Taken only where +0xE8
+ * holds this build's position setter, so the vtable is laid out as the one it was read from. */
+#define CCT_VT_SET_POSITION 0xE8
+#define CCT_VT_SET_ROTATION 0x110
+#define MAIN_CODE_SIZE 0x3C80000
+
+typedef void (*set_rotation_t)(uintptr_t property, const float rotation[9]);
+
+static set_rotation_t rotation_setter(void)
+{
+  uintptr_t vtable = MAIN(Z64HD_VT_CCT_PROPERTY);
+  if (!sys_mapped(vtable + CCT_VT_SET_POSITION, CCT_VT_SET_ROTATION - CCT_VT_SET_POSITION + 8, SYS_PERM_R) ||
+      sys_ptr(vtable + CCT_VT_SET_POSITION) != MAIN(Z64HD_CCT_SET_POSITION))
+    return 0;
+  uintptr_t fn = sys_ptr(vtable + CCT_VT_SET_ROTATION);
+  return fn > z64hd_main && fn - z64hd_main < MAIN_CODE_SIZE ? (set_rotation_t)fn : 0;
+}
+
+bool cct_teleport(const vec3f_t *position, const float *rotation)
+{
+  controller_t current;
+  if (!resolve(&current) ||
+      !(position->x > -100000 && position->x < 100000 && position->y > -100000 && position->y < 100000 &&
+        position->z > -100000 && position->z < 100000))
+    return false;
+  MAIN_FN(void (*)(uintptr_t, const vec3f_t *), Z64HD_CCT_SET_POSITION)(current.property, position);
+  set_rotation_t set_rotation = rotation ? rotation_setter() : 0;
+  if (set_rotation)
+    set_rotation(current.property, rotation); /* after the position: it keeps the pending one */
+  cct_reset_vertical_velocity(current.actor);
+  return true;
+}
+
 void cct_noclip_end(void)
 {
   if (!owner.body)

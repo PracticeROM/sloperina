@@ -49,6 +49,7 @@ struct menu_item {
   bool (*on_move)(menu_item_t *it, int dir);         /* d-up/down: true if the item used it (scrolling) */
   /* gz's buttons in a row: with n_parts > 1, d-left/right picks `part` and L presses it */
   int  n_parts, part;
+  bool first_part;                                   /* moved onto: its first part (no column carried over) */
   void (*press)(menu_item_t *it, int part);
   bool press_repeat;                                 /* L held presses again (gz's scroll arrows) */
   const char *const *part_hints;                     /* the hint for each part (gz-style tooltips) */

@@ -35,6 +35,8 @@ def is_text(text):
         return False
     if "_" in text or "\\x" in text:  # an identifier, or raw bytes
         return False
+    if re.fullmatch(r"[a-z]+(?:/[a-z]+)+", text):  # words joined by '/' ("import/export"), not a path
+        return True
     if " " not in text and ("/" in text or text.startswith("%")):  # a path, or a bare format
         return False
     if re.fullmatch(r"[A-Za-z0-9]+", text) and re.search(r"[A-Z]", text) and re.search(r"[a-z]", text):

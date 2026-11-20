@@ -12,15 +12,16 @@ Everything sloperinaGZ can do, menu by menu. New to it? Start with the [usage gu
   - [2.1 Link](#21-link)
   - [2.2 Warps](#22-warps)
   - [2.3 Scene](#23-scene)
-  - [2.4 Cheats](#24-cheats)
-  - [2.5 Inventory](#25-inventory)
-  - [2.6 Equips](#26-equips)
-  - [2.7 Watches](#27-watches)
-  - [2.8 Save management](#28-save-management)
-  - [2.9 Story](#29-story)
-  - [2.10 Debug](#210-debug)
-  - [2.11 Settings](#211-settings)
-  - [2.12 About](#212-about)
+  - [2.4 Memfiles](#24-memfiles)
+  - [2.5 Cheats](#25-cheats)
+  - [2.6 Inventory](#26-inventory)
+  - [2.7 Equips](#27-equips)
+  - [2.8 Watches](#28-watches)
+  - [2.9 Save management](#29-save-management)
+  - [2.10 Story](#210-story)
+  - [2.11 Debug](#211-debug)
+  - [2.12 Settings](#212-settings)
+  - [2.13 About](#213-about)
 - [3 On the screen](#3-on-the-screen)
 - [4 About frame advance](#4-about-frame-advance)
 - [5 Settings file](#5-settings-file)
@@ -45,7 +46,7 @@ emulators alike. Open the menu with **R + right stick down**.
 | **R + D-pad left** or **B** | Back one menu (closes the menu at the top) |
 
 While the menu is open the game doesn't see the controller. These are the defaults, as gz's: every one of them, and
-every shortcut below, can be changed in **settings > rebind commands** ([2.11.4](#2114-rebind-commands)). The menu's hints and the
+every shortcut below, can be changed in **settings > rebind commands** ([2.12.4](#2124-rebind-commands)). The menu's hints and the
 controls at its foot show the buttons as they're bound.
 
 ### 1.2 Reading the menu
@@ -73,11 +74,11 @@ With the menu closed (the defaults; **settings > rebind commands** changes them)
 | **R + A + D-pad right** | Reset **jump height** to FLT_MAX (as after a load: the jumpslash then works at any height) |
 | **R + D-pad up** | Save position: where Link is and which way he faces |
 | **R + D-pad down** | Load position: put Link back there (same map only) |
-| **L3** | Levitate on / off (if enabled, [2.11.2](#2112-levitate)) |
+| **L3** | Levitate on / off (if enabled, [2.12.2](#2122-levitate)) |
 | **X / B** held | Levitate up / down; release to hover |
 | **R3** held | Levitate: hold height even if X/B is held |
 | **R3** | Ragdoll (as a bomb hit) when not levitating |
-| **L** | Frame advance (if enabled, [2.11.3](#2113-frame-advance)) |
+| **L** | Frame advance (if enabled, [2.12.3](#2123-frame-advance)) |
 | **L + L3** (either order) | Frame advance: run again |
 
 **reload map** and **end cutscene** can be given buttons too (**settings > rebind commands**, under **scene**); they
@@ -188,7 +189,31 @@ by more than 5 units voids; it's named in the log when it happens), and a few du
 cells round Link are read again every two seconds or when Link has moved 4 units, out to 24 units to the side, 48 units down
 and 16 units up; where there are more lines than fit, the farthest are left out.
 
-### 2.4 Cheats
+### 2.4 Memfiles
+
+In-memory snapshots stored until the game is closed, capturing full GameData (via the game's own serializer), unsaved session flags, map, time of day, Link's position/facing/health/magic/gear, and the player camera + AI action state.
+
+| Item | What it does |
+|---|---|
+| **slot** `< 1..5 >` | Picks which of the five memfile slots **save memfile**, **load memfile** and **import/export** use. |
+| **save memfile** | Saves the current state into the selected slot (kept in memory only). |
+| **load memfile** | Closes the menu and restores the selected slot's GameData, map, time, Link and camera. |
+| **import/export** | Opens `sloperinaGZ/memfiles` on the SD card, one folder at a time: its path at the top, a row of buttons (left/right picks one, **L** presses it), a line, then the folder itself with its folders and `.szm` files under it. The buttons: **new folder** (asks for its name, made in this one); **export here** (asks for a name, the slot's map to start with, then writes the selected slot into this folder as `<name>.szm`; a name already used there is refused); **delete this folder** (not at the top: a screen says what's in it, with **no, keep it** first, then **yes, delete it** deletes the folder and every memfile and folder in it). **L** on the folder's own row goes up a folder (at `sloperinaGZ/memfiles`, as far up as it goes, it does nothing); **L** on a folder under it opens it; **L** on a file's name reads it into the selected slot (a slot in use: **L**, then **L** again to replace it); right to the red cross after it, then **L** and **L** again, deletes the file from the SD card. |
+| **fast same-map** | When on (default), loading while already in the same map and age with no event running resets actors and gimmicks in place without a loading screen. Otherwise, triggers a silent full map reload. |
+| **session flags** | When on (default), loads also restore unsaved session fields (`save_file == -1`, such as NPC talk state, minigame state, and destructibles/room state). |
+
+Under **return**: each of the 5 slots (showing `empty` or `<map> (child/adult)`), plus the current save/load status while busy.
+
+Memfiles also bring back Nayru's Love (on with its time left, or off) and Farore's Wind's warp point and sparkle.
+
+Memfiles are only written to or read from the SD card when you export or import one. A `.szm` file can be shared: it records the game version it was made on (1.0.0 or 1.1.1) and the sloperina version that wrote it, and is refused on another game version, by an older sloperina that can't read its format, or if it's damaged. Newer sloperina versions read memfiles made by older ones; a part an older file doesn't have (or a newer file has that this version doesn't know) is left as the map sets it. Memfiles exported by the early test builds of this feature (format 1) can't be imported. A memfile holds a whole save's GameData, so loading someone else's replaces your current game's progress in memory, just as loading your own does: the game's save files are only changed if the game saves afterwards.
+
+Saving is refused during a cutscene, a game over, or while the game is paused (pause screen, map, item wheel); loading is refused during a cutscene or while paused. Loading during a game over is allowed (it reloads the map).
+
+Caveats:
+- Link climbing a ladder, vine or wall isn't restored: he's put back at the spot and drops.
+
+### 2.5 Cheats
 
 **infinite**: energy, rupees, magic, deku sticks, deku nuts, deku seeds, bombs, arrows, bombchus, magic beans,
 business scrub seeds (30): each kept full while ticked.
@@ -198,7 +223,7 @@ against a wall, rock or air wall and Link walks on through it at the height he w
 or turn it. While floating, levitate's own **through walls** setting applies instead. (To keep jump height at its
 maximum, see **watches > lock jump height**.)
 
-### 2.5 Inventory
+### 2.6 Inventory
 
 | Menu | What's in it |
 |---|---|
@@ -213,11 +238,11 @@ maximum, see **watches > lock jump height**.)
 Everything goes through the game's own code where it needs it: items appear on the pause screen, the HUD
 redraws, taking away an item you're wearing takes it off Link, and an item on a button comes off the button.
 
-### 2.6 Equips
+### 2.7 Equips
 
 What Link is wearing and holding right now (read only).
 
-### 2.7 Watches
+### 2.8 Watches
 
 gz's watch list: values shown on the screen in a box while you play.
 
@@ -283,7 +308,7 @@ freeze, not a patch of the game's setter: writes and checks within a single game
 before the mod runs. Build and host tests do not establish whether this prevents every launch restriction
 in-game; test normal jumps, sidehops, jumpslashes, scene changes, and restarts on the supported game version.
 
-### 2.8 Save management
+### 2.9 Save management
 
 The top-level **save management** menu: copies of the game's save folder on the SD card, made after each save or
 when you ask, and putting one back in place of the save.
@@ -349,14 +374,14 @@ backed up**, shows after each automatic one (**save archived** after **archive n
 100; the oldest go first. To restore one with the game closed instead, copy its contents back over the game's save
 folder (on an emulator: right-click the game > *Open save data location*).
 
-### 2.9 Story
+### 2.10 Story
 
 | Item | What it does |
 |---|---|
 | **all tutorials seen** | Marks every tutorial message as seen, so they stop popping up. |
 | *each quest* | The quest's current stage; D-pad left / right (or **L**) changes it. It takes effect after a loading zone. |
 
-### 2.10 Debug
+### 2.11 Debug
 
 **tests > dive tests**: **from heights** and **while moving** measure how deep Link goes into water by how he falls in. Start
 one with Link swimming at the surface (facing open water for **while moving**) and leave the controls alone: it
@@ -364,11 +389,11 @@ measures the surface, drops him again and again from set heights (from heights: 
 16 and 96 above it, 0 to 13.6 units/s the way he faces), twice each, and writes each drop's fall time, speed
 going in, and deepest point to `log.txt` ("dive test: ..."). Choose it again to stop.
 
-#### 2.10.1 Heap
+#### 2.11.1 Heap
 
 How much memory the game has and uses (refreshed every second), and **view the heap in memory**.
 
-#### 2.10.2 Memory
+#### 2.11.2 Memory
 
 gz's memory viewer.
 
@@ -382,11 +407,11 @@ gz's memory viewer.
 
 Unreadable memory shows as `??`; read-only memory can't be changed. **Editing memory can crash the game.**
 
-#### 2.10.3 Pause research
+#### 2.11.3 Pause research
 
 The game's own pause state, for development: values you can watch, change and log.
 
-#### 2.10.4 Flag logging
+#### 2.11.4 Flag logging
 
 Records changes to the game's saved progress flags while you play, to learn what each flag is for. Every named story
 flag, event flag, item flag, counter and quest stage kept in the save is compared with the frame before. Flags
@@ -402,7 +427,7 @@ files go to `sloperinaGZ/flaglog/` on the SD card. There are three, each with it
 The switches are kept in the settings, so they stay on across starts. The lines under the menu show each file and
 how many rows this session has added. While **record flag changes** is on, **Event flag written to CSV** shows in the bottom right
 when a flag changes, at most once a second ("3 event flags written to CSV" when more changed in that time). Each
-change is also kept in the log menu: choose **event flags** as its filter (2.10.5).
+change is also kept in the log menu: choose **event flags** as its filter (2.11.5).
 
 Each row has the date and time (the console's clock, e.g. `13/11/2026 15:47:02`), the seconds since this session's recording
 started, the frame, the map, Link's position, what Link was doing (`EvtTalk` while he talks; 1.1.1 only), the
@@ -431,7 +456,7 @@ also adds the script (`set_by`, e.g. `SageOfWater/IceCavern_WaterSerenade` for t
 `Step04`), the NPC and the dialogue just before the change. The scripts say who *can* set a flag, so when several
 can, the `match` column says how sure the pick is; see the tool's help.
 
-#### 2.10.5 Log
+#### 2.11.5 Log
 
 Under **log history**: the last 128 messages sloperinaGZ wrote, newest first, five at a time. **↑** above them and
 **↓** below them scroll (hold **L** to keep going), and in the game's style a scroll bar beside them shows where you are.
@@ -440,7 +465,7 @@ Under **log history**: the last 128 messages sloperinaGZ wrote, newest first, fi
 |---|---|
 | **filter** `< all >` | Which messages: **all**, only **problems** (anything that couldn't be done), **event flags**, or one kind (warp, settings, notice... whatever kinds there are). |
 
-**event flags** shows the flag changes recorded by flag logging (2.10.4), each with the date and time, e.g.
+**event flags** shows the flag changes recorded by flag logging (2.11.4), each with the date and time, e.g.
 `13/11 15:47:02 HavePlayedEvent.Npc_Kokiri_Mido_Child_C1C2_TT 0 -> 1`. It keeps the last 128 flag changes in a list of
 their own, so other messages don't push them out. Flags without a known name show their hash.
 
@@ -448,7 +473,7 @@ Everything is also written to **`sloperinaGZ/log.txt`** on the SD card (on an em
 Lichii build 150+: `%APPDATA%\lichii\sdmc\sloperinaGZ\log.txt`; Fritchii v5.8+: `%APPDATA%\fritchii\sdmc\sloperinaGZ\log.txt`; Eden and older Lichii / Fritchii: `%APPDATA%\eden\sdmc\sloperinaGZ\log.txt`), with the time since the game started, about once a
 second. It starts fresh each time the game starts. Send it along when you report a problem.
 
-### 2.11 Settings
+### 2.12 Settings
 
 The settings menu lists its menus: **menu settings**, **input display**, **levitate**, **frame advance** and **rebind
 commands**.
@@ -469,7 +494,7 @@ shown, sloperinaGZ's own keyboard is used.
 
 **watch box header** (on at first): a small **watches** header over the watches box, underlined.
 
-#### 2.11.1 Input display
+#### 2.12.1 Input display
 
 gz's input display, at the bottom left unless you move it (hidden while the menu is open).
 
@@ -484,7 +509,7 @@ gz's input display, at the bottom left unless you move it (hidden while the menu
 | **position** | The corner it's in on its own, or **custom** (where **move input display position** left it), as the watches box. Not used while it's attached to the watches. |
 | **move input display position** | Move it anywhere: the D-pad glides it (hold to speed up), **L** leaves it there. It's shown while you move it, and so are the watches if they're on. |
 
-#### 2.11.2 Levitate
+#### 2.12.2 Levitate
 
 | Item | What it does |
 |---|---|
@@ -512,7 +537,7 @@ and no landing damage. This does not establish behavior at every surface or duri
 Void protection is not included (what voids Link can be seen with [2.3.3](#233-void-out)). Camera-follow and stationary-position
 pause behavior have not been separately fixed.
 
-#### 2.11.3 Frame advance
+#### 2.12.3 Frame advance
 
 | Item | What it does |
 |---|---|
@@ -524,7 +549,7 @@ Its buttons are the **frame advance** and **run again** commands (**L** and **L 
 rebind commands**). Bound to one button, the game doesn't see that button while frame advance is on; a combination's buttons
 stay the game's. Settings from before the commands with frame advance on **R** become **R** and **R + L3**.
 
-#### 2.11.4 Rebind commands
+#### 2.12.4 Rebind commands
 
 gz's **commands** menu, here **rebind commands**: each of sloperinaGZ's controls and the buttons it's bound to, under **menu**, **frame
 advance**, **link**, **scene** and **watches and timer**. The **scene** commands, **reload map** ([2.1](#21-link)) and **end
@@ -549,7 +574,7 @@ In the settings file each is `bind_<name>=<buttons>`, e.g. `bind_menu=R + rs-dow
 button names: `A B X Y L R ZL ZR L3 R3 plus minus d-up d-down d-left d-right ls-up ls-down ls-left ls-right rs-up
 rs-down rs-left rs-right SL SR`.
 
-### 2.12 About
+### 2.13 About
 
 The name and version, the build date ("Build Date: ..."), and the website.
 
@@ -558,9 +583,9 @@ The name and version, the build date ("Build Date: ..."), and the website.
 | What | Where | Notes |
 |---|---|---|
 | Menu | Top left, under the D-pad icon | Always on top. |
-| Watches | The corner you choose, or anywhere | [2.7](#27-watches) |
+| Watches | The corner you choose, or anywhere | [2.8](#28-watches) |
 | Log | Bottom right | What you just did; stays a second, then fades. gz's grey text with a shadow. |
-| Input display | Bottom left, or the corner you choose, or anywhere, or attached above or below the watches | [2.11.1](#2111-input-display); in the bottom left, it moves above the watches if they're there too. |
+| Input display | Bottom left, or the corner you choose, or anywhere, or attached above or below the watches | [2.12.1](#2121-input-display); in the bottom left, it moves above the watches if they're there too. |
 | Pause icon | Top left | Two bars: paused by frame advance. |
 | Air walls | Over the game | [2.3.1](#231-environment) |
 | Save slots | Over the game | [2.3.2](#232-save-position) |

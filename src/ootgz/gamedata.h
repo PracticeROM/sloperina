@@ -32,6 +32,10 @@ bool      gd_ready(void);           /* manager present and the Int fields look v
  * objects: object i is at objects + i * stride, its value at + value_off (a copy follows it). */
 gd_type_t *gd_type(gd_kind_t kind);
 void      gd_layout(gd_kind_t kind, uint32_t *stride, uint32_t *value_off);
+/* the type entry at manager + offset if it looks like one (types gamedata.c has no accessor for), or 0 */
+gd_type_t *gd_type_at(uint32_t offset);
+/* the object index of field `hash` in a type entry (gd_type, gd_type_at, or gd_string_type) */
+bool      gd_type_index(const gd_type_t *type, uint32_t hash, uint32_t *index);
 void      gd_reset(void);           /* forget cached type entries (call on save load) */
 
 /* Int: through the game's own GetInt/SetInt (SetInt is queued and applied at the flush). */
@@ -46,6 +50,8 @@ bool      gd_get_float(uint32_t hash, float *out);
 bool      gd_set_float(uint32_t hash, float value);
 bool      gd_get_enum(uint32_t hash, uint32_t *out);  /* value = murmur3(choice) */
 bool      gd_set_enum(uint32_t hash, uint32_t value);
+bool      gd_get_vec3(uint32_t hash, float v[3]);
+bool      gd_set_vec3(uint32_t hash, const float v[3]);
 
 /* String64 field hashes. Their array indices can change when a game update adds fields. */
 #define GD_STR_TUNIC    0x008D7F0Cu

@@ -28,6 +28,7 @@ goes back. As in gz, every control can be rebound in **settings > rebind command
 - **link**: health, heart containers, rupees, age and reload map; position, speed and map.
 - **warps**: any map and spawn point, at once, with the game's own fade.
 - **scene**: reload the map; the map's air walls drawn over the game (collision); where Link voids out.
+- **memfiles**: 4 in-memory snapshot slots (full GameData, unsaved session flags, map, time, Link and camera), with fast in-place same-map reloads.
 - **cheats**: infinite health, rupees, magic and ammo; 2x movement speed.
 - **inventory**: items, equipment, collection (upgrades, strength, scale, magic), bottles, quest items, songs,
   dungeon items and small keys, all through the game's own code where it needs it.

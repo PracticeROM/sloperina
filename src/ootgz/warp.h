@@ -9,10 +9,15 @@
 extern bool warp_arrival_cutscenes; /* use the spawn's own arrival instead of the standard one */
 
 void warp_arm(const warp_map_t *map, const spawn_t *spawn);
+/* Request Dm_SY_BancChangeGo without fallback, clearing Sequence_ReservedBootEventName / Starter so arrival
+ * skips cutscenes & arrival camera (memfile.c). False immediately if refused (no exit-swap fallback). */
+bool warp_arm_silent(const warp_map_t *map, const spawn_t *spawn);
 void warp_cancel(void);
 void warp_frame(void);              /* frame hook */
 const char *warp_state(void);       /* for the warps menu */
 bool warp_pending(void);            /* requested or armed, not yet happened */
 bool warp_abandoned(void);          /* cancelled or timed out before Link left the map */
+/* the last warp_arm/warp_arm_silent went through the game's event (instant), not the exit fallback */
+bool warp_requested(void);
 
 #endif

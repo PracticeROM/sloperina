@@ -64,7 +64,7 @@ FORCE:
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.c $(HDRS) | $(OBJDIR)
 	$(CC) $(CFLAGS) -I$(OBJDIR) -c $< -o $@
-$(OBJDIR)/menus.o: $(OBJDIR)/build_info.h
+$(OBJDIR)/menus.o $(OBJDIR)/memfile.o: $(OBJDIR)/build_info.h
 $(OBJDIR)/%.o: $(SRCDIR)/%.S | $(OBJDIR)
 	$(CC) $(ASFLAGS) -c $< -o $@
 $(BINDIR)/ootgz.elf: $(patsubst $(SRCDIR)/%,$(OBJDIR)/%.o,$(basename $(SSRC) $(CSRC))) $(LDSCRIPT) | $(BINDIR)

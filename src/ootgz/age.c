@@ -162,6 +162,28 @@ static warp_map_t unlisted_map;
 static spawn_t unlisted_spawn;
 static char unlisted_name[GD_STR_LEN], unlisted_pos[GD_STR_LEN];
 
+static bool reload_target(const char *name, const char *last_start, bool allow_fallback_pos,
+                          const warp_map_t **map_out, const spawn_t **spawn_out)
+{
+  const warp_map_t *map = find_map(name);
+  const spawn_t *spawn = 0;
+  if (map) {
+    spawn = find_reload_spawn(map, last_start);
+  } else if ((last_start && last_start[0]) || allow_fallback_pos) {
+    /* a map the warps don't list (houses, shops...): its last start point, arriving as from a
+     * warp song (no starter actor needed) */
+    snprintf(unlisted_name, sizeof(unlisted_name), "%s", name);
+    snprintf(unlisted_pos, sizeof(unlisted_pos), "%s", (last_start && last_start[0]) ? last_start : "StartPos_00");
+    unlisted_map = (warp_map_t){ unlisted_name, unlisted_name, WC_OTHER, 0, 0, 0 };
+    unlisted_spawn = (spawn_t){ unlisted_pos, unlisted_pos, "Dm_SY_BancChangeArrive", 0 };
+    map = &unlisted_map;
+    spawn = &unlisted_spawn;
+  }
+  *map_out = map;
+  *spawn_out = spawn;
+  return map && spawn;
+}
+
 void age_reload_map(void)
 {
   const char *current_map = gd_get_str(GD_STR_MAP);
@@ -179,21 +201,9 @@ void age_reload_map(void)
   }
   log_printf("reload: %s -> %s, last start point \"%s\", age %d -> %d", current_map, name,
              last_start ? last_start : "?", current_age, age);
-  const warp_map_t *map = find_map(name);
-  const spawn_t *spawn = 0;
-  if (map) {
-    spawn = find_reload_spawn(map, last_start);
-  } else if (last_start && last_start[0]) {
-    /* a map the warps don't list (houses, shops...): its last start point, arriving as from a
-     * warp song (no starter actor needed) */
-    snprintf(unlisted_name, sizeof(unlisted_name), "%s", name);
-    snprintf(unlisted_pos, sizeof(unlisted_pos), "%s", last_start);
-    unlisted_map = (warp_map_t){ unlisted_name, unlisted_name, WC_OTHER, 0, 0, 0 };
-    unlisted_spawn = (spawn_t){ unlisted_pos, unlisted_pos, "Dm_SY_BancChangeArrive", 0 };
-    map = &unlisted_map;
-    spawn = &unlisted_spawn;
-  }
-  if (!map || !spawn) {
+  const warp_map_t *map;
+  const spawn_t *spawn;
+  if (!reload_target(name, last_start, false, &map, &spawn)) {
     gfx_notice("can't reload: no start point known for this map");
     return;
   }
@@ -209,6 +219,18 @@ void age_reload_map(void)
   }
   wanted_age = -1; /* from now on, follow the game's again */
   warp_arm(map, spawn);
+}
+
+bool age_warp_to_silent(const char *name, const char *last_start, bool have_pos)
+{
+  const warp_map_t *map;
+  const spawn_t *spawn;
+  if (!name || !name[0] || !reload_target(name, last_start, have_pos, &map, &spawn))
+    return false;
+  log_printf("reload: %s, start point \"%s\" (memfile load)", name, spawn->pos);
+  wanted_age = -1; /* the caller's game data says the age */
+  undo_age = -1;
+  return warp_arm_silent(map, spawn);
 }
 
 void age_frame(void)

@@ -1,5 +1,7 @@
 #include "gamedata.h"
 
+#include <string.h>
+
 #include "sys.h"
 #include "z64hd.h"
 
@@ -143,6 +145,24 @@ static uint32_t *gd_lookup(const gd_type_t *type, uint32_t hash)
   return 0;
 }
 
+gd_type_t *gd_type_at(uint32_t offset)
+{
+  uint8_t *mgr = gd_manager();
+  if (!mgr || offset > Z64HD_GD_TYPES_SCAN)
+    return 0;
+  gd_type_t *t = (gd_type_t *)(mgr + offset);
+  return type_plausible(t) ? t : 0;
+}
+
+bool gd_type_index(const gd_type_t *type, uint32_t hash, uint32_t *index)
+{
+  const uint32_t *pair = type ? gd_lookup(type, hash) : 0;
+  if (!pair || pair[1] >= type->count)
+    return false;
+  *index = pair[1];
+  return true;
+}
+
 /* The value of field `hash` of type `kind` (its copy follows it), or 0. */
 static uint8_t *gd_value(gd_kind_t kind, uint32_t hash)
 {
@@ -236,6 +256,39 @@ bool gd_set_enum(uint32_t hash, uint32_t value)
   if (v)
     v[0] = v[1] = value;
   return v != 0;
+}
+
+#define GD_VEC3_TYPE_OFF 0x3C8u
+#define GD_VEC3_STRIDE   0x40u
+#define GD_VEC3_VAL_OFF  0x24u
+
+bool gd_get_vec3(uint32_t hash, float v[3])
+{
+  const gd_type_t *t = gd_type_at(GD_VEC3_TYPE_OFF);
+  uint32_t index = 0;
+  if (!t || !v || !gd_type_index(t, hash, &index))
+    return false;
+  uintptr_t src = (uintptr_t)(t->objects + (size_t)index * GD_VEC3_STRIDE + GD_VEC3_VAL_OFF);
+  if (!sys_mapped(src, 12, SYS_PERM_R))
+    return false;
+  memcpy(v, (const void *)src, 12);
+  return true;
+}
+
+bool gd_set_vec3(uint32_t hash, const float v[3])
+{
+  const gd_type_t *t = gd_type_at(GD_VEC3_TYPE_OFF);
+  uint32_t index = 0;
+  if (!t || !v || !gd_type_index(t, hash, &index))
+    return false;
+  if (!sys_mapped((uintptr_t)t->objects, (size_t)t->count * GD_VEC3_STRIDE, SYS_PERM_R | SYS_PERM_W))
+    return false;
+  if (t->count > 1 && sys_ptr((uintptr_t)t->objects) != sys_ptr((uintptr_t)t->objects + GD_VEC3_STRIDE))
+    return false;
+  uintptr_t dst = (uintptr_t)(t->objects + (size_t)index * GD_VEC3_STRIDE + GD_VEC3_VAL_OFF);
+  memcpy((void *)dst, v, 12);
+  memcpy((void *)(dst + 12), v, 12);
+  return true;
 }
 
 /* --- String64 ---------------------------------------------------------------------------- */

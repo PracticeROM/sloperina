@@ -12,6 +12,9 @@ bool pouch_remove_now(const char *item);
 bool ui_refresh_now(uintptr_t vtable_off); /* virtual method 98 of the screen with that vtable */
 uintptr_t ui_find_screen(uintptr_t vtable_off); /* the UI manager's screen with that vtable (open), or 0 */
 bool hud_refresh_now(void);
+/* Put Link's gear on as PlayerStatus.Equip* say (the game's full re-apply, as its nodes call it on the pouch
+ * manager), then redraw the HUD (item buttons). */
+bool gear_reapply_now(void);
 int32_t pouch_stock(const char *item);     /* PouchData.<item>.StockNum, or -1 */
 
 /* Queued operations. */

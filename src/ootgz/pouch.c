@@ -162,6 +162,16 @@ bool hud_refresh_now(void)
   return screen && call_refresh(screen);
 }
 
+bool gear_reapply_now(void)
+{
+  void *mgr = pouch_manager();
+  if (!mgr || !z64hd_game->equip_all_fn)
+    return false;
+  MAIN_FN(equip_all_t, z64hd_game->equip_all_fn)((uintptr_t)mgr, 0);
+  hud_refresh_now();
+  return true;
+}
+
 /* --- queued operations --------------------------------------------------------------------- */
 
 /* A job's key: its kind in the top byte, then 24 bits that tell apart jobs of one kind (usually

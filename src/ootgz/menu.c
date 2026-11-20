@@ -166,7 +166,7 @@ static void move_selection(menu_t *menu, int direction)
       continue;
     /* rows of buttons: the cursor stays in its column, as gz's does */
     if (item->n_parts > 1) {
-      if (!from_button_row)
+      if (!from_button_row || item->first_part)
         item->part = 0;
       else
         item->part = column < item->n_parts ? column : item->n_parts - 1;
