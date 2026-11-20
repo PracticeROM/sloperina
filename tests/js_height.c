@@ -15,6 +15,17 @@
 #include "font.h"
 #include "cheats.h"
 #include "z64hd.h"
+#include "airwall.h"
+#include "binds.h"
+#include "enemyhp.h"
+#include "flaglog.h"
+#include "gameimage.h"
+#include "input.h"
+#include "menus.h"
+#include "savebackup.h"
+#include "savepos.h"
+#include "swkbd.h"
+#include "voidmap.h"
 
 _Static_assert(sizeof(uintptr_t) == 8 && sizeof(float) == 4, "requires a 64-bit host with f32");
 _Static_assert(W_X == 0 && W_AIRWALL == 16 && W_JS_HEIGHT == 17, "keep saved watch IDs stable");
@@ -26,6 +37,20 @@ bool enemy_hp_shown;
 bool cheats[CHEAT_COUNT], frame_advance, pause_display, warp_arrival_cutscenes;
 bool levitate_enabled, levitate_through_walls, airwalls_shown, airwalls_push, airwalls_block, airwalls_all;
 int frame_advance_button, levitate_speed = 5, levitate_move_speed = 5;
+/* The settings of features that need the game (their own files read its memory), as those files start them, so
+ * settings.c and the menu see them as they would at boot. The command binds are the real binds.c (linked). */
+bool airwalls_xray, enemy_hp_xray, frame_advance_in_pause, hide_over_item_wheel, hide_in_game_menus = true;
+bool flaglog_enabled, flaglog_status_enabled, flaglog_story_enabled, savepos_shown, savepos_load = true;
+bool save_backup_enabled, save_backup_location, save_backup_hard_numbered = true, swkbd_enabled = true;
+int save_backup_kinds = SAVE_BACKUP_BOTH;
+bool voidmap_shown, voidmap_ground, voidmap_deadly = true, voidmap_ring = true, voidmap_areas = true, voidmap_xray;
+static char archive_folder[SAVE_FOLDER_LEN];
+const char *savebackup_archive_folder(void) { return archive_folder; }
+void savebackup_set_archive_folder(const char *f) { snprintf(archive_folder, sizeof(archive_folder), "%s", f); }
+bool gameimage_lost(int picture) { (void)picture; return true; } /* no game pictures here: the menu draws text */
+int input_controller(void) { return INPUT_PRO; }
+
+#define SAVE_GAP (2 * GAME_FPS) /* settings.c's SAVE_GAP_FRAMES: frames between settings writes */
 
 static uintptr_t actor, first, player, base;
 static uint32_t value;
@@ -197,7 +222,7 @@ static void test_settings(void)
   watch_set_hidden(3, true);
   watch_set_label(3, "custom JS");
   watch_move(3, -1);
-  for (int i = 0; i < 60; i++) settings_frame(false);
+  for (int i = 0; i < SAVE_GAP; i++) settings_frame(false);
   assert(strstr(settings, "17:0:1") && strstr(settings, "watch_label_17=custom JS"));
   watch_set_list(NULL, 0);
   settings_load();
@@ -205,7 +230,7 @@ static void test_settings(void)
   assert(!strcmp(watch_list[2].label, "custom JS"));
   assert(!watch_add(W_JS_HEIGHT));
   watch_remove(2);
-  for (int i = 0; i < 60; i++) settings_frame(false);
+  for (int i = 0; i < SAVE_GAP; i++) settings_frame(false);
   settings_load();
   assert(watch_count == 4 && watch_list[3].id == W_JS_HEIGHT); /* permanent after restart */
   assert(!watch_list[3].hidden);
@@ -224,7 +249,7 @@ static void test_settings(void)
   settings_load();
   assert(levitate_speed == 0);
   watch_set_label(0, "save hover"); /* trigger settings save */
-  for (int i = 0; i < 60; i++) settings_frame(false);
+  for (int i = 0; i < SAVE_GAP; i++) settings_frame(false);
   assert(strstr(settings, "levitate_speed=0\n"));
   levitate_speed = 4;
   settings_load();
@@ -268,27 +293,28 @@ static void test_hud(const char *image)
   watches_frame(false);
   gfx_frame();
   const gfx_screen_t *s = gfx_published();
-  assert(s && s->panel[1].rows == 1);
+  assert(s && s->panel[1].rows == 2); /* the "watches" header (on by default), then the watch */
   const gfx_panel_t *p = &s->panel[1];
-  assert(!strncmp(p->ch[0], "jump height  Max", 16));
+  assert(!strncmp(p->ch[0], "watches", 7));
+  assert(!strncmp(p->ch[1], "jump height  Max", 16));
   js_height_lock = true;
   watches_frame(false);
   gfx_frame();
   p = &gfx_published()->panel[1];
-  assert(!strncmp(p->ch[0], "jump height\x80 Max", 16));
+  assert(!strncmp(p->ch[1], "jump height\x80 Max", 16));
   char label[24];
   watch_entry_label(&watch_list[0], label, sizeof(label));
   assert(!strcmp(label, "jump height")); /* status must not enter the rename field */
   watch_set_label(0, "abcdefghijkl");
   watch_entry_display_label(&watch_list[0], label, sizeof(label));
-  assert(!strcmp(label, "abcdefghij \x80"));
+  assert(!strcmp(label, "abcdefghijk\x80")); /* cut to fit the lock in the label column */
   assert(!strcmp(watch_list[0].label, "abcdefghijkl"));
   watch_set_label(0, "");
   render_panel(p, image);
   js_height_lock = false;
   watches_frame(false);
   gfx_frame();
-  assert(!strncmp(gfx_published()->panel[1].ch[0], "jump height  Max", 16));
+  assert(!strncmp(gfx_published()->panel[1].ch[1], "jump height  Max", 16));
   watch_set_hidden(0, true);
   watches_frame(false);
   gfx_frame();
@@ -403,6 +429,7 @@ static void test_reset_lock(void)
 
 int main(int argc, char **argv)
 {
+  binds_reset(); /* as the module's first frame does, before settings_load */
   assert(watches_shown && watch_count == 7 && watch_list[6].id == W_JS_HEIGHT && !watch_list[6].hidden);
   int n, current;
   const char *const *types = watch_entry_types(&watch_list[6], &n, &current);

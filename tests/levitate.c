@@ -44,9 +44,21 @@ bool sys_mapped(uintptr_t a, size_t n, uint32_t perm)
   return mapped && ((a >= (uintptr_t)physics && a + n <= (uintptr_t)(physics + 11)) ||
                     (a >= (uintptr_t)cam && a + n <= (uintptr_t)(cam + 24)));
 }
-uint32_t sys_query_memory(sys_meminfo_t *m, uint64_t a) { (void)m; (void)a; return 1; }
+/* The game's heap as the record search sees it: one ordinary read/write region, the simulated record. With no
+ * heap at all gcc proves the search can only ever test address 0, and warns about the writes there. */
+uint32_t sys_query_memory(sys_meminfo_t *m, uint64_t a)
+{
+  if (!mapped || a < (uintptr_t)physics || a >= (uintptr_t)(physics + 11))
+    return 1;
+  *m = (sys_meminfo_t){ .addr = (uintptr_t)physics, .size = sizeof(physics), .type = MEMORY_TYPE_NORMAL,
+                        .perm = SYS_PERM_R | SYS_PERM_W };
+  return 0;
+}
 void sys_regions(uint32_t perm, void (*fn)(uintptr_t, size_t, void *), void *ctx)
-{ (void)perm; (void)fn; (void)ctx; }
+{
+  if (mapped)
+    fn((uintptr_t)physics, sizeof(physics), ctx);
+}
 uint64_t sys_tick(void) { return 100; }
 uint64_t sys_tick_freq(void) { return 1000; }
 uint32_t input_held(void) { return held; }
@@ -63,6 +75,13 @@ bool cmd_pressed(command_t c) { return c == CMD_LEVITATE && (pressed & BTN_LSTIC
 void input_sticks(int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry)
 { *lx = stick_x; *ly = *rx = *ry = 0; }
 void log_printf(const char *fmt, ...) { (void)fmt; }
+/* no map names, so no loading zones: levitate never ends for one here */
+const char *gd_get_str(uint32_t hash) { (void)hash; return 0; }
+uint32_t frame_counter(void) { return 0; }
+const airshape_t data_exitshapes[1];
+const airwall_t data_exits[1];
+const airmap_t data_exitmaps[1];
+const int data_n_exitmaps = 0;
 void gfx_notice(const char *s) { (void)s; }
 
 static void sync_drawn(void)
