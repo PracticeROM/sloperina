@@ -445,7 +445,7 @@ Under **log history**: the last 128 messages sloperinaGZ wrote, newest first, fi
 their own, so other messages don't push them out. Flags without a known name show their hash.
 
 Everything is also written to **`sloperinaGZ/log.txt`** on the SD card (on an emulator, its virtual SD card;
-Lichii build 150+: `%APPDATA%\lichii\sdmc\sloperinaGZ\log.txt`; Fritchii v5.8+: `%APPDATA%\fritchii\sdmc\sloperinaGZ\log.txt`; Eden and older Lichii / Fritchii: `%APPDATA%\eden\sdmc\sloperinaGZ\log.txt`), with the time since the game started, about once a
+Lichii build 150+: `%APPDATA%\lichii\sdmc\sloperinaGZ\log.txt`; Fritchii v5.8+: `%APPDATA%\fritchii\sdmc\sloperinaGZ\log.txt`; Eden and older Lichii / Fritchii: `%APPDATA%\eden\sdmc\sloperinaGZ\log.txt`), with the time since the game started and the game's frame counter (`[   12.345 f742] ...`: the **frame** watch's number, to match a line to a frame), about once a
 second. It starts fresh each time the game starts. Send it along when you report a problem.
 
 ### 2.11 Settings

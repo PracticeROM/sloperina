@@ -1,5 +1,8 @@
 #include "sys.h"
 
+#include "link.h"
+#include "z64hd.h"
+
 #define PREFIX "sloperinaGZ: " /* on each line of the emulator's / Atmosphère's log */
 #define PREFIX_LEN (sizeof(PREFIX) - 1)
 
@@ -161,13 +164,15 @@ static void file_lock_release(void)
   __atomic_clear(&file_lock, __ATOMIC_RELEASE);
 }
 
-/* Queue one line for the log file, with a "[seconds.ms] " stamp. */
+/* Queue one line for the log file, with a "[seconds.ms f<frame>] " stamp: the time since the game started and
+ * the game's frame counter (0 until the game's build is known), so a line can be matched to a frame. */
 static void file_pending_add(const char *text, size_t len)
 {
   file_lock_take();
   uint64_t ms = sys_tick() * 1000 / sys_tick_freq();
-  char stamp[24];
-  int stamp_len = snprintf(stamp, sizeof(stamp), "[%5u.%03u] ", (unsigned)(ms / 1000), (unsigned)(ms % 1000));
+  char stamp[40];
+  unsigned frame = z64hd_game ? (unsigned)frame_counter() : 0;
+  int stamp_len = snprintf(stamp, sizeof(stamp), "[%5u.%03u f%u] ", (unsigned)(ms / 1000), (unsigned)(ms % 1000), frame);
   if (stamp_len > 0 && file_pending_len + (size_t)stamp_len + len + 1 < FILE_PENDING_SIZE) {
     memcpy(file_pending + file_pending_len, stamp, (size_t)stamp_len);
     memcpy(file_pending + file_pending_len + stamp_len, text, len);

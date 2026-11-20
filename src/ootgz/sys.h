@@ -60,7 +60,7 @@ void log_raw(const char *s);
 #define LOG_LINES 128
 #define LOG_LINE_LEN 96
 const char *log_line(int i); /* 0 = newest; NULL past the end */
-/* the lines logged since the last call ("[seconds] text\n" each), for the log file (settings.c) */
+/* the lines logged since the last call ("[seconds f<frame>] text\n" each), for the log file (settings.c) */
 size_t log_take_pending(char *out, size_t cap);
 void *memmove(void *dst, const void *src, size_t n);
 
