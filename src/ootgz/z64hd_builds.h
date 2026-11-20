@@ -166,6 +166,8 @@ static const struct z64hd_build z64hd_builds[] = {
     .vt_load_list = 0x4BEEBA0,
     .load_list_hide_rows = 0x3773490,
     .vt_save_load_confirm = 0x4BEF840,
+    .challenge_mgr_ptr = 0x4E29950,
+    .challenge_set_step = 0x2CF54A0,
     .link_paths = {
       { 0x4E371D0, 0x480 }, { 0x4E94858, 0x2E0 }, { 0x4E935B8, 0xEF8 },
       { 0x4E94860, 0x328 }, { 0x4E94368, 0xD70 },

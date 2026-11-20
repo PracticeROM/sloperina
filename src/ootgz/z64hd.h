@@ -116,6 +116,10 @@ struct z64hd_build {
   uint32_t vt_load_list;
   uint32_t load_list_hide_rows;
   uint32_t vt_save_load_confirm;
+  /* the quests' stages (quests.c, FINDINGS 9.12): [main+challenge_mgr_ptr] the ChallengeMgr; challenge_set_step its
+   * set-step. 0: not known for this build (the story menu writes GameData only) */
+  uint32_t challenge_mgr_ptr;
+  uint32_t challenge_set_step;
   struct z64hd_link_path link_paths[5];
 };
 

@@ -1405,3 +1405,29 @@ reads every slot's caption once, at boot, and keeps it.
   These runs used the console fork with the same reload-controller changes and address mappings.
   Master Quest was covered by the host/native-reset checks, not a confirmed console run.
   No new Lichii or 1.1.1 runtime test is claimed.
+
+### 9.12 Quest stages: the ChallengeMgr (v131072; from the disassembly, checked in game 19th November 2026)
+A quest's stage is a GameData Enum (`Step_<name>`, the **story** menu's values), but the game's **ChallengeMgr**
+keeps every quest's stage itself and reads GameData back only after a save load (leo's finding in #practicerom).
+Writing the Enum alone changes what reads GameData (dialogue choices, expression flags) and not what asks the
+manager: NPC schedules (`AISchedule`) and the stage's own events.
+- **The instance:** `*[main+0x4E29950]` (`SeqOneShotChallengeSyncToGameData`'s work, `main+0xD8D000`, loads it
+  through GOT `main+0x4C7F9F0`). Its quests are in three lists of 352-byte entries, count (s32) and array at
+  `+0x40`/`+0x48`, `+0x50`/`+0x58`, `+0x60`/`+0x68`. In an entry: `+0x08` the quest's key, murmur3 of its name
+  without `Step_` (`Meet_DekuTree` 0x4DBCA27F); `+0x10` the stage (murmur3 of its name); `+0x16` flags (u16; 0x400
+  a new stage is queued); `+0xA0` the GameData field (murmur3 of `Step_<name>`); `+0xA4` the queued stage.
+- **Setting a stage:** `main+0x2CF54A0` (mgr, quest key, stage, flag, reset, force), what
+  `OneShotChallengeSetStep` (`main+0x28BE1A0`) calls. It finds the entry by key, refuses (returns false) when the
+  quest is at NotReady or Complete unless `force`, and otherwise queues the stage (`+0xA4`, flags 0x400; `flag`
+  clears 0x8 instead of setting it; `reset` marks the stage's sub-entries); the manager's update
+  (`main+0x2CF3E6C`) makes the change and writes GameData. `TriggerChallengeSetStep`'s path calls it with 0, 0, 0.
+- **Re-reading GameData:** `mgr+0x72 = 1` (what `SeqOneShotChallengeSyncToGameData` does, unless `mgr+0x75` bit 0)
+  makes the next update read every quest's field and queue the stages that differ, then clear the byte.
+
+The story menu sets a stage through `main+0x2CF54A0` (with force) where the build's addresses are known, else it
+writes GameData. Checked in Lichii on 1.1.1, Kokiri Forest save: the manager held the new stage two frames after
+the menu set it, and the game wrote GameData itself; with **deku tree** set to complete and the map reloaded, the
+game played its own "Deku Tree completed" scene (`KokiriForest_Get_StoneOfForest_Completed_Event`, which clears
+`KokiriForest_Npc_Kokiri_Mido_Child_Blocker`), and after one more reload Mido no longer stood on the path to the Deku
+Tree. Writing the Enum alone, as before, left the manager at Ready: no scene, and Mido still blocked. 1.0.0: leo
+gives the set-step at `0x2CA16F0`; the instance is not mapped yet, so 1.0.0 keeps the GameData write.

@@ -21,6 +21,7 @@
 #include "levitate.h"
 #include "lock.h"
 #include "position.h"
+#include "quests.h"
 #include "savepos.h"
 #include "voidmap.h"
 #include "ragdoll.h"
@@ -1482,10 +1483,11 @@ static int get_stage(menu_item_t *it)
   return -1;
 }
 
+/* the stage goes through the quest manager where this build's is known (quests.h) */
 static void set_stage(menu_item_t *it, int stage)
 {
   const quest_t *quest = &data_quests[it->data];
-  gd_set_enum(quest->hash, murmur3(quest->stages[stage]));
+  quest_set_stage(quest, murmur3(quest->stages[stage]));
 }
 
 /* the stage's name, lower case */
@@ -1517,7 +1519,8 @@ static void build_story(void)
                                          set_stage, i);
     if (quest) {
       quest->choice_text = stage_text;
-      quest->hint = "d-left/right or L: change stage (applies after a loading zone)";
+      quest->hint = quests_through_manager() ? "d-left/right or L: change stage (the game takes it at once)"
+                                             : "d-left/right or L: change stage (applies after a save load)";
     }
   }
   menu_add_return(&m_story);

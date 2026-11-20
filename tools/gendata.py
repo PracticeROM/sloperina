@@ -382,8 +382,9 @@ def write_story(out, story):
         out.write(f"static const char *const stages_{i}[] = {{ " + stages + " };")
     out.write("const quest_t data_quests[] = {")
     for i, (hash_hex, quest) in enumerate(quests):
-        out.write(f"  {{ {c_string(quest_label(quest['name']))}, {int(hash_hex, 16):#010x}, {len(quest['stages'])}, "
-                  f"stages_{i} }},")
+        key = murmur3(quest["name"].removeprefix("Step_"))  # the ChallengeMgr's name for the quest (FINDINGS 9.12)
+        out.write(f"  {{ {c_string(quest_label(quest['name']))}, {int(hash_hex, 16):#010x}, {key:#010x}, "
+                  f"{len(quest['stages'])}, stages_{i} }},")
     out.end_array("data_quests")
     guides = story["action_guides"]
     guide_hashes = ", ".join(f"{int(hash_hex, 16):#010x}" for hash_hex in guides.values())
