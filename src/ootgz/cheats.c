@@ -3,7 +3,6 @@
 #include "gamedata.h"
 #include "link.h"
 #include "sys.h"
-#include "z64hd.h"
 
 const char *const cheat_names[CHEAT_COUNT] = {
   "energy", "rupees", "magic", "deku sticks", "deku nuts", "deku seeds", "bombs", "arrows",
@@ -46,59 +45,39 @@ static void fill_to(uint32_t field_hash, int32_t target)
     gd_set_int(field_hash, target);
 }
 
-/* The magic meter object holds the real current magic: it writes clamp(value, 0, capacity)
- * into the save field every frame (FINDINGS §1 "Magic"). It holds the two field hashes at
- * +0x38/+0x3C and the value at +0x44. */
-#define MAGIC_OBJ_HASHES     0x38 /* u32 magic hash, then u32 capacity hash */
-#define MAGIC_OBJ_VALUE      0x44 /* s32 current magic */
-#define MAGIC_OBJ_SIZE       0x48 /* what must be mapped from the object's start */
-#define MAGIC_SEARCH_FRAMES  (5 * GAME_FPS) /* between searches while it's missing */
-#define MAGIC_SCAN_PER_FRAME  (16u << 20)
+/* The magic meter object lives inline inside Link's player component at +0x1B78: it writes
+ * clamp(value, 0, capacity) into the save field every frame (FINDINGS §1 "Magic"). It holds the
+ * two field hashes at +0x38/+0x3C and the value at +0x44. */
+#define ACTOR_COMPONENTS   0x270
+#define COMPONENTS_PLAYER  0x358
+#define PLAYER_ACTOR       0x18
+#define PLAYER_MAGIC_OBJ   0x1B78
+#define MAGIC_OBJ_HASHES   0x38 /* u32 magic hash, then u32 capacity hash */
+#define MAGIC_OBJ_VALUE    0x44 /* s32 current magic */
+#define MAGIC_OBJ_SIZE     0x48 /* what must be mapped from the object's start */
 
-static uintptr_t magic_obj;
-static uint32_t magic_next_search; /* frame_counter() value */
-static mem_scan_t magic_scan;
-
-/* mem_find_u64 filter: the hashes found are inside a writable magic meter object */
-static bool magic_candidate_ok(uintptr_t hashes_addr, void *unused)
-{
-  (void)unused;
-  return hashes_addr >= MAGIC_OBJ_HASHES &&
-         sys_mapped(hashes_addr - MAGIC_OBJ_HASHES, MAGIC_OBJ_SIZE, SYS_PERM_R | SYS_PERM_W);
-}
-
-/* The meter's current magic, or 0 if the object isn't found (yet): the heap search is spread over the
- * frames that ask, and starts again MAGIC_SEARCH_FRAMES after one that found nothing. */
+/* The meter's current magic, resolved directly from Link's player component, or 0. */
 static int32_t *magic_value(void)
 {
   const uint64_t hashes = (uint64_t)HASH_MAGIC_CAPACITY << 32 | HASH_MAGIC;
-  if (magic_obj && sys_mapped(magic_obj + MAGIC_OBJ_HASHES, 8, SYS_PERM_R) &&
-      *(uint64_t *)(magic_obj + MAGIC_OBJ_HASHES) == hashes)
-    return (int32_t *)(magic_obj + MAGIC_OBJ_VALUE);
-  magic_obj = 0;
-  uint32_t now = frame_counter();
-  if ((int32_t)(now - magic_next_search) < 0)
+  uintptr_t actor = link_actor();
+  uintptr_t components = actor ? sys_ptr(actor + ACTOR_COMPONENTS) : 0;
+  uintptr_t player = components ? sys_ptr(components + COMPONENTS_PLAYER) : 0;
+  if (!player || (player & 7) || player > UINTPTR_MAX - (PLAYER_MAGIC_OBJ + MAGIC_OBJ_SIZE) ||
+      sys_ptr(player + PLAYER_ACTOR) != actor)
     return 0;
-  uintptr_t found = mem_find_u64_step(&magic_scan, hashes, magic_candidate_ok, 0, MAGIC_SCAN_PER_FRAME);
-  if (found || magic_scan.done) {
-    magic_scan = (mem_scan_t){0};
-    magic_next_search = now + MAGIC_SEARCH_FRAMES;
-  }
-  magic_obj = found ? found - MAGIC_OBJ_HASHES : 0;
-  return magic_obj ? (int32_t *)(magic_obj + MAGIC_OBJ_VALUE) : 0;
+  uintptr_t obj = player + PLAYER_MAGIC_OBJ;
+  if (!sys_mapped(obj, MAGIC_OBJ_SIZE, SYS_PERM_R | SYS_PERM_W) ||
+      *(const volatile uint64_t *)(obj + MAGIC_OBJ_HASHES) != hashes)
+    return 0;
+  return (int32_t *)(obj + MAGIC_OBJ_VALUE);
 }
-
-/* a value waiting for the search to find the meter */
-static bool magic_wanted;
-static int32_t magic_wanted_value;
 
 void magic_set(int32_t value)
 {
   int32_t *meter_value = magic_value();
   if (meter_value)
     *meter_value = value;
-  magic_wanted = !meter_value && magic_scan.pos;
-  magic_wanted_value = value;
   gd_set_int(HASH_MAGIC, value);
 }
 
@@ -106,8 +85,6 @@ void cheats_frame(void)
 {
   if (!gd_ready())
     return;
-  if (magic_wanted)
-    magic_set(magic_wanted_value);
   if (cheats[CHEAT_ENERGY]) {
     int32_t *current, *max;
     if (link_health(&current, &max) && *current < *max)

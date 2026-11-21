@@ -83,10 +83,12 @@ struct z64hd_build {
   uint32_t cct_force_no_hit;  /* void (body, bool): queued, preserves filter state */
   uint32_t cct_set_position;  /* void (property, const vec3f_t *): updates attached bodies */
   uint32_t cct_set_velocity;  /* void (body, const vec3f_t *): queues linear velocity */
-  /* the scene manager (its current scene's components, FINDINGS 9.3) and AutoSaveMgr's update, which finds
-   * it among them (savepos.c, FINDINGS 9.7); 0: not known for this build */
+  /* [main+this]: phive::PhysicsMgr* holder (cct.c: direct hknpMotion lookup); 0: not known */
+  uint32_t phive_mgr_ptr;
+  /* the scene manager (its current scene's components, FINDINGS 9.3) and AutoSaveMgr's vtable
+   * (scene component 12, savepos.c, FINDINGS 9.7); 0: not known for this build */
   uint32_t scene_mgr_ptr;
-  uint32_t autosave_update;
+  uint32_t vt_autosave;
   /* bool (actor, const float pos[3], float out[3], const void *riding, bool, int): the load's search for a safe
    * place round SavePos (FINDINGS 9.7); 0: not known for this build */
   uint32_t safety_search;
@@ -134,8 +136,10 @@ extern uintptr_t z64hd_main;
 #define MAIN_FN(type, off) ((type)MAIN(off))
 
 /* Structure offsets shared by the supported builds. */
+#define Z64HD_GD_BOOL_TYPE      0x08        /* manager+: the Bool type entry (see gamedata.h) */
 #define Z64HD_GD_INT_TYPE       0xC8        /* manager+: the Int type entry (see gamedata.h) */
-#define Z64HD_GD_TYPES_SCAN     0x800       /* other type entries are found by vtable within manager+0..this */
+#define Z64HD_GD_FLOAT_TYPE     0x188       /* manager+: the Float type entry */
+#define Z64HD_GD_ENUM_TYPE      0x248       /* manager+: the Enum type entry */
 #define Z64HD_GD_STRING_TYPE    0x608       /* manager+: the String64 type entry */
 #define Z64HD_STR_STRIDE        0x108
 #define Z64HD_STR_VALUE         0x68        /* char *value, followed by u32 capacity */

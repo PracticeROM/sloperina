@@ -1,7 +1,7 @@
 /* Where a load puts Link: AutoSaveMgr's slots (FINDINGS §9.7).
  *
- * AutoSaveMgr is one of the current scene's components (§9.3, usually entry 12), found by its update
- * (z64hd autosave_update) in its vtable. It holds two slots: B (+0x178), which Link's restart point is handed
+ * AutoSaveMgr is entry 12 of the current scene's components (§9.3), checked against its vtable
+ * (z64hd vt_autosave). It holds two slots: B (+0x178), which Link's restart point is handed
  * on to (main+0x60830C), and A (+0x198), set elsewhere, which wins when it's valid. Each frame the game copies
  * the winner to PlayerStatus.SavePos / SavePosRadY, and a save stores that. Each is drawn as a ring on the
  * ground, an arrow the way Link will face and a pole; the one SavePos takes has a cross on its pole.
@@ -42,8 +42,7 @@ static struct {
 #define SCENE_COUNT 0x50       /* u32 */
 #define SCENE_COMPONENTS 0x58  /* pointer to the components' pointers */
 #define SCENE_COMPONENTS_MAX 64
-#define AUTOSAVE_ENTRY 12      /* where it was each time; looked for in the others too */
-#define VTABLE_SCAN 0x60       /* the update is among the vtable's first this many entries */
+#define AUTOSAVE_ENTRY 12      /* scene components[12] = AutoSaveMgr */
 static const uint32_t slot_offset[SAVEPOS_SLOTS] = { 0x198, 0x178 };
 #define SLOT_SIZE 0x14         /* f32 yaw, f32 x, y, z, u8 valid (and two flags) */
 #define SLOT_VALID 0x10
@@ -65,48 +64,33 @@ static const float pole_height[SAVEPOS_SLOTS] = { 1.8f, 1.4f }; /* apart, for wh
 #define OCARINA_POLE 1.0f /* slot B where the ocarina would put it: lower than the real one's */
 #define ACTOR_POS 0x31C   /* the actor's position (his feet; what the restart point is taken from) */
 
-static uintptr_t cached_scene, cached_mgr, cached_vtable;
+static uintptr_t cached_scene, cached_mgr;
 
-static bool vtable_has_update(uintptr_t vtable)
-{
-  if (!vtable || !sys_mapped(vtable, VTABLE_SCAN * sizeof(uintptr_t), SYS_PERM_R))
-    return false;
-  uintptr_t want = MAIN(z64hd_game->autosave_update);
-  for (int i = 0; i < VTABLE_SCAN; i++)
-    if (((const uintptr_t *)vtable)[i] == want)
-      return true;
-  return false;
-}
-
-/* AutoSaveMgr of the current scene, or 0. The scene and the manager are kept while they stay the same. */
+/* AutoSaveMgr of the current scene (entry AUTOSAVE_ENTRY), or 0. The scene and the manager are kept
+ * while they stay the same. */
 static uintptr_t autosave_mgr(void)
 {
-  if (!z64hd_game || !z64hd_game->autosave_update || !z64hd_game->scene_mgr_ptr)
+  if (!z64hd_game || !z64hd_game->vt_autosave || !z64hd_game->scene_mgr_ptr)
     return 0;
   uintptr_t scene_mgr = sys_ptr(MAIN(z64hd_game->scene_mgr_ptr));
   uintptr_t scene = scene_mgr ? sys_ptr(scene_mgr + SCENE_CURRENT) : 0;
   if (!scene)
     return 0;
-  if (scene == cached_scene && cached_mgr && sys_ptr(cached_mgr) == cached_vtable)
+  uintptr_t want_vtable = MAIN(z64hd_game->vt_autosave);
+  if (scene == cached_scene && cached_mgr && sys_ptr(cached_mgr) == want_vtable)
     return cached_mgr;
   cached_scene = scene;
   cached_mgr = 0;
   uint32_t count;
   uintptr_t components = sys_ptr(scene + SCENE_COMPONENTS);
-  if (!components || !sys_read32(scene + SCENE_COUNT, &count) || count > SCENE_COMPONENTS_MAX)
+  if (!components || !sys_read32(scene + SCENE_COUNT, &count) ||
+      count <= AUTOSAVE_ENTRY || count > SCENE_COMPONENTS_MAX)
     return 0;
-  for (uint32_t k = 0; k < count; k++) {
-    uint32_t i = k == 0 ? AUTOSAVE_ENTRY : k == AUTOSAVE_ENTRY ? 0 : k; /* entry 12 first */
-    if (i >= count)
-      continue;
-    uintptr_t component = sys_ptr(components + i * sizeof(uintptr_t));
-    uintptr_t vtable = component ? sys_ptr(component) : 0;
-    if (vtable_has_update(vtable)) {
-      cached_mgr = component;
-      cached_vtable = vtable;
-      log_printf("save position: AutoSaveMgr %#lx (scene entry %u)", (unsigned long)component, (unsigned)i);
-      break;
-    }
+  uintptr_t component = sys_ptr(components + AUTOSAVE_ENTRY * sizeof(uintptr_t));
+  if (component && sys_ptr(component) == want_vtable) {
+    cached_mgr = component;
+    log_printf("save position: AutoSaveMgr %#lx (scene entry %u)", (unsigned long)component,
+               (unsigned)AUTOSAVE_ENTRY);
   }
   return cached_mgr;
 }

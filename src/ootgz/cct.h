@@ -21,7 +21,7 @@ bool cct_body_velocity(uintptr_t body, vec3f_t *out);
 bool cct_on_ground(uintptr_t expected_actor, bool *grounded);
 bool cct_clear_fall_distance(uintptr_t expected_actor);
 
-/* The handle of Link's body in the physics world's body entries; 0 while it isn't known. */
-uint64_t cct_body_handle(void);
+/* Link's live Havok motion record (hknpMotion + 0x10: position doubles + 48-byte motion state); 0 if unavailable. */
+uintptr_t cct_motion_record(void);
 
 #endif

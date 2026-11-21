@@ -16,11 +16,10 @@ void levitate_frame(bool menu_open);
 const char *levitate_state(void); /* for watches/menus */
 bool levitate_floating(void);     /* L3 has him floating (R3 then holds height) */
 
-/* Link's physics record (where his position really lives), found and kept here; save / load position
- * (position.c) moves him through it too. Positions are drawn ones (the record sits 0.585 above). */
-typedef enum { REC_NONE, REC_SEARCHING, REC_READY, REC_FAILED } link_record_status_t;
+/* Link's physics record (where his position really lives), resolved directly from his controller;
+ * save / load position (position.c) moves him through it too. Positions are drawn ones (the record sits 0.585 above). */
+typedef enum { REC_NONE, REC_READY } link_record_status_t;
 link_record_status_t link_record_status(void);
-void link_record_request(void);   /* look for it, if it isn't known (a heap scan over a few frames) */
 /* move Link there now; v (x, z) is the velocity written with it (it doesn't turn him: link_record_turn does).
  * The record may then lag behind the drawn position for settle_frames without counting as lost. False if it
  * isn't known. */

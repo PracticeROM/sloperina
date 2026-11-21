@@ -107,7 +107,7 @@ What changed from the Python version:
 | one mailbox request per frame, polled by a worker thread | direct calls; `job.c` keeps one step per frame |
 | XInput/keyboard on Windows | `nn::hid::detail::GetNpadStates` from the game's sdk |
 | Tk overlay window | `gfx.h`: log backend now, on-screen backend next |
-| equipment component / magic meter: heap scan | same idea, in-process (`mem_find_u64`), after a cheap search near Link |
+| equipment component / magic meter: heap scan | direct pointers: owner `[*[main+pouch_mgr_ptr]]` (`+0x470` component); magic `[[link+0x270]+0x358]+0x1B78` |
 
 ## Verified in Lichii (2026-11-09)
 

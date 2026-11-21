@@ -1405,3 +1405,36 @@ reads every slot's caption once, at boot, and keeps it.
   These runs used the console fork with the same reload-controller changes and address mappings.
   Master Quest was covered by the host/native-reset checks, not a confirmed console run.
   No new Lichii or 1.1.1 runtime test is claimed.
+
+### 9.12 Direct pointer paths replacing memory walks (1.0.0 and 1.1.1)
+
+Disassembly of both `1.0.0` (`v65536`) and `1.1.1` (`v131072`) `main` binaries mapped every remaining
+heap/struct/vtable walk in `sloperinaGZ` to O(1) direct paths (shared struct layouts in both builds):
+
+1. **Link's Havok physics record (`cct.c`, `levitate.c`):**
+   - `phive_mgr_ptr`: `main+0x4C18258` (`1.0.0`), `main+0x4C7DF00` (`1.1.1`). (Kept separate from `voxel_mgr_ptr`
+     so `voidmap.c` gating on 1.0.0 is unchanged.)
+   - From Link's controller body `cct_body = [[[[[[link_actor()+0x270]+0x50]+0x20]+0x10]+8]+0x20]`:
+     - `world_idx = (*(u64 *)(cct_body + 0x70) >> 5) & 1`
+     - `body_id = (u32)(*(u64 *)(*(uintptr_t *)(cct_body + 0x78) + 8))`, `body_idx = body_id & 0xFFFFFF`
+     - `hknpWorld = [[[*(*(main+phive_mgr_ptr) + 0xC0) + 0xC8 + world_idx * 8] + 0xE0]`
+     - `hknpBody = [hknpWorld + 0x48][body_idx / 42] + (body_idx % 42) * 0xC0` (`+0xB8 == cct_body`)
+     - `motion_id = *(u32 *)(hknpBody + 0x80)` (`< *(u32 *)(hknpWorld + 0x798)`)
+     - `hknpMotion = [hknpWorld + 0x708][motion_id >> 6] + (motion_id & 0x3F) * 0x80` (`*(u32 *)(hknpMotion + 0x60) == body_id`)
+   - The physics record is `hknpMotion + 0x10` (position doubles followed by 48-byte motion state; `+0x50` is
+     `hknpMotion + 0x60`/`+0x64`, which holds `body_id` above `0x5F7F3DCD`).
+2. **Magic meter (`cheats.c`):**
+   - Inline inside Link's player component at `[[link_actor() + 0x270] + 0x358] + 0x1B78` (`1.0.0`: `0x421030`
+     called by `0x6DD260`/`0x6DDB68`; `1.1.1`: `0x1639B0` called by `0x608CD0`/`0x6095D8`). Value at `+0x44`,
+     hashes at `+0x38`.
+3. **Link's equipment owner and component (`link.c`):**
+   - Callers of `equip_all_fn` (`1.0.0`: `0xEE0840`, `1.1.1`: `0xF201B0`) pass `owner = *(*(main + pouch_mgr_ptr))`
+     (`1.0.0`: `0x4C18428`, `1.1.1`: `0x4C7E0D0`; vtable `vt_equip_owner`), and `equip_all_fn` reads
+     `component = *(owner + 0x470)` (vtable `vt_equip`, `+0x18 == link_actor()`).
+4. **GameData type entries (`gamedata.c`):**
+   - Verified in the `GameDataMgr` constructor (`1.0.0`: `0x11BCDC0`, `1.1.1`: `0x11FD010`): `GD_BOOL` `+0x08`,
+     `GD_INT` `+0xC8`, `GD_FLOAT` `+0x188`, `GD_ENUM` `+0x248`, `String64` `+0x608`.
+5. **AutoSaveMgr (`savepos.c`):**
+   - Verified in restart-point handoff (`1.0.0`: `0x6DC870..0x6DC8B0`, `1.1.1`: `0x6082C4..0x608304`):
+     `AutoSaveMgr` is `scene->components[12]` (`[scene+0x58] + 12 * 8`), checked against `vt_autosave`
+     (`1.0.0`: `0x4B3B5F8`, `1.1.1`: `0x4BA0848`).

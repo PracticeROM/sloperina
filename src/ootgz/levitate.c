@@ -1,12 +1,9 @@
 /* Levitate and 2x speed: both move Link through his physics record.
  *
- * Link's position lives in a physics record: doubles (x, y, z) 0.585 above his drawn position,
- * followed by motion state the game ignores the position without (FINDINGS §5.9-§5.15). game.py found
- * the record by searching the heap and test-moving the look-alikes (moving the wrong one once broke
- * the camera). Here the search starts from Link's actor instead: follow its pointers a few levels
- * deep, a few hundred objects per frame, collect records that match his position, then test-lift
- * each (kept only if his drawn position follows; put back at once otherwise). The pointer path to the
- * one that works is logged, so a later version can go straight to it.
+ * Link's position lives in a Havok hknpMotion record: doubles (x, y, z) 0.585 above his drawn position,
+ * followed by 48 bytes of motion state the game ignores the position without (FINDINGS §5.9-§5.15).
+ * cct_motion_record() resolves that record directly from Link's character controller body through
+ * phive::PhysicsMgr and hknpWorld (no heap scan or test-lifting).
  *
  * Levitate (as ootmenu, game.py _float, once per frame): L3 starts floating, L3 again drops him, R3
  * held keeps the height; X rises, B descends, neither hovers. The left stick moves him
@@ -54,8 +51,6 @@ int levitate_move_speed = 6;  /* stick, units/s */
 #define MOTION_SIZE 48
 #define MOTION_WORDS 12
 #define RECORD_SIZE (RECORD_POS_SIZE + MOTION_SIZE)
-#define RECORD_HANDLE 0x50        /* cct_body_handle */
-#define RECORD_SPAN (RECORD_HANDLE + 8)
 #define RECORD_REQUESTED_VEL 0x24 /* requested velocity (z, x, y floats) */
 #define RECORD_COLLIDED_VEL 0x3C  /* the same after collision */
 /* A turn: a float the game takes as a yaw rate. Written once, Link turns by value / 60 radians (the way his facing
@@ -64,12 +59,7 @@ int levitate_move_speed = 6;  /* stick, units/s */
 #define RECORD_TURN 0x34
 
 #define PHYS_Y 0.585            /* the record's height above Link's drawn position */
-#define MATCH 0.3               /* per axis: how close a record must be to Link's position */
-#define FOLLOW_TOLERANCE 3      /* per axis: the found record still belongs to Link */
-#define COPY_TOLERANCE 10       /* per axis: a second position this close after the first is a copy */
-#define TEST_LIFT 0.6
-#define TEST_FRAMES 6
-#define RETRY_FRAMES 150        /* after a failed search */
+#define FOLLOW_TOLERANCE 3      /* per axis: the record still belongs to Link */
 #define RISE_RAMP 0.35          /* s to reach the rise speed (game.py LEV_RISE_RAMP) */
 #define MOVE_RAMP 0.15
 #define PUSHBACK_MIN 0.01       /* units: a push-back this big marks a wall */
@@ -92,9 +82,6 @@ int levitate_move_speed = 6;  /* stick, units/s */
 #define SPEED_TRACE_FRAMES 12   /* frames of 2x speed that are logged (once) */
 #define WALLS_TRACE_FRAMES 24   /* frames of walking through a wall that are logged (each time) */
 
-#define MEMORY_TYPE_MASK 0xFF
-#define MEMORY_TYPE_NORMAL 0x05 /* ordinary heap memory */
-
 #define FLOAT_EXPONENT_MASK 0x7F800000u
 #define MOTION_FLOAT_MAX 10000.0f
 
@@ -113,25 +100,11 @@ static const uint8_t captured_motion[MOTION_SIZE] = {
   0x00, 0x00, 0x00, 0x00, 0xcc, 0xcf, 0x8d, 0x40, 0xfc, 0xf9, 0x9f, 0x3e, 0x24, 0x3c, 0xa1, 0xbf,
 };
 
-static enum {
-  SEARCH_IDLE,
-  SEARCH_FINDING, /* scanning the heap */
-  SEARCH_TESTING, /* test-lifting a match */
-  SEARCH_READY,   /* `record` is Link's */
-  SEARCH_FAILED,  /* waiting before searching again */
-} search_state;
 static uintptr_t record;
-/* the 48 bytes after the position are game.py's motion state (floats); in the record this search
- * finds they're more position doubles, and writing motion state over them crashed the game */
 static bool record_has_motion;
-/* 0 if the record was found by test lifts */
-static uint64_t record_handle;
-static bool quiet_search; /* started by the speed cheat: no notices */
-/* the record API (levitate.h): a search asked for by position.c, and frames in which a move it made
- * may still be settling (the record ahead of the drawn position isn't "lost") */
-static bool requested;
+/* the record API (levitate.h): frames in which a move made through it may still be settling
+ * (the record ahead of the drawn position isn't "lost") */
 static int hold_frames;
-static int retry_wait_frames;
 static uint64_t last_tick;
 
 static double abs_double(double v)
@@ -139,72 +112,8 @@ static double abs_double(double v)
   return v < 0 ? -v : v;
 }
 
-/* --- finding the record: a heap scan, nearest Link's actor first -----------------------------------
- * (game.py's method. A pointer search from the actor only reached copies the game rewrites from the
- * real record every frame: FINDINGS §5.19.) Each frame scans SCAN_PER_FRAME bytes, so the game keeps
- * running. Where Link's body handle is known the scan looks for the entry that carries it: one match,
- * no test (a respawn leaves look-alike positions near his old entry). Otherwise each position match is
- * test-lifted as soon as it's found, and the scan carries on if it isn't his. */
-
-#define MAX_REGIONS 16384
-#define SCAN_PER_FRAME (16u << 20)
-#define MAX_TESTS_PER_SEARCH 6
-static struct { uintptr_t lo, hi; } heap_regions[MAX_REGIONS];
-static int n_heap_regions;
-static int scan_region;   /* index into heap_regions */
-static uintptr_t scan_pos; /* the next address to look at */
-static int n_tested;
-static uintptr_t scan_origin;
-static uintptr_t last_found; /* where the record was last time: the next search starts there */
-static size_t bytes_scanned;
-static uint64_t search_handle; /* 0: match by position and test */
-
-typedef struct { uintptr_t addr; double error; } candidate_t;
-static candidate_t candidate;
-static uint8_t saved_record[RECORD_SIZE]; /* the candidate before the test lift */
-static bool test_wrote_motion;
-static int test_frames;
-static vec3f_t search_pos;      /* Link's drawn position */
-static vec3f_t test_start_pos;  /* Link's drawn position when the test lift started */
-
-static void add_heap_region(uintptr_t base, size_t size, void *ctx)
-{
-  (void)ctx;
-  sys_meminfo_t info;
-  if (n_heap_regions < MAX_REGIONS && sys_query_memory(&info, base) == 0 &&
-      (info.type & MEMORY_TYPE_MASK) == MEMORY_TYPE_NORMAL) {
-    heap_regions[n_heap_regions].lo = base;
-    heap_regions[n_heap_regions].hi = base + size;
-    n_heap_regions++;
-  }
-}
-
-static uintptr_t region_distance(int index)
-{
-  uintptr_t lo = heap_regions[index].lo;
-  uintptr_t hi = heap_regions[index].hi;
-  if (scan_origin < lo)
-    return lo - scan_origin;
-  if (scan_origin >= hi)
-    return scan_origin - hi;
-  return 0;
-}
-
-/* nearest the scan origin first (shell sort: there can be thousands) */
-static void sort_regions(void)
-{
-  for (int gap = n_heap_regions / 2; gap > 0; gap /= 2)
-    for (int i = gap; i < n_heap_regions; i++)
-      for (int j = i; j >= gap && region_distance(j - gap) > region_distance(j); j -= gap) {
-        __typeof__(heap_regions[0]) swap = heap_regions[j];
-        heap_regions[j] = heap_regions[j - gap];
-        heap_regions[j - gap] = swap;
-      }
-}
-
 /* The 48 bytes after Link's position are motion state: all zero while he stands, otherwise floats
- * of modest size (velocities). Anything else (pointers, garbage) means this isn't his record, and
- * writing there is what crashed the game: game.py's warning about look-alikes, FINDINGS §5.9. */
+ * of modest size (velocities). */
 static bool plausible_motion(uintptr_t motion, bool *all_zero)
 {
   *all_zero = true;
@@ -220,103 +129,6 @@ static bool plausible_motion(uintptr_t motion, bool *all_zero)
       return false;
   }
   return true;
-}
-
-/* Another x, y, z (as doubles, near the first) right after the position: one of the copies, not the
- * record (FINDINGS §5.19). */
-static bool followed_by_copy(uintptr_t addr)
-{
-  const volatile double *d = (const volatile double *)addr;
-  return abs_double(d[3] - d[0]) < COPY_TOLERANCE && abs_double(d[4] - d[1]) < COPY_TOLERANCE &&
-         abs_double(d[5] - d[2]) < COPY_TOLERANCE;
-}
-
-static void search_start(bool quiet)
-{
-  uintptr_t link = link_actor();
-  if (!link || !link_drawn_pos(&search_pos))
-    return;
-  n_heap_regions = 0;
-  sys_regions(SYS_PERM_R | SYS_PERM_W, add_heap_region, 0);
-  /* records are made again in each area, near where they were (game.py POS_NEAR) */
-  scan_origin = last_found ? last_found : link;
-  sort_regions();
-  scan_region = 0;
-  scan_pos = n_heap_regions ? heap_regions[0].lo : 0;
-  bytes_scanned = 0;
-  n_tested = 0;
-  quiet_search = quiet;
-  search_handle = cct_body_handle();
-  search_state = SEARCH_FINDING;
-  log_printf("levitate: scanning %d heap regions for Link's record (handle %llx), nearest %#lx first",
-             n_heap_regions, (unsigned long long)search_handle, (unsigned long)scan_origin);
-}
-
-/* Could the record at addr be Link's? If so, *error is how far it is from his position. */
-static bool record_matches(uintptr_t addr, double *error)
-{
-  if (search_handle) {
-    if (*(volatile uint64_t *)(addr + RECORD_HANDLE) != search_handle)
-      return false;
-    const volatile double *p = (const volatile double *)addr;
-    double dx = abs_double(p[0] - search_pos.x), dy = abs_double(p[1] - search_pos.y - PHYS_Y);
-    double dz = abs_double(p[2] - search_pos.z);
-    if (!(dx < FOLLOW_TOLERANCE && dy < FOLLOW_TOLERANCE && dz < FOLLOW_TOLERANCE))
-      return false; /* an entry his body has left, not yet reused */
-    *error = dx + dy + dz;
-    return true;
-  }
-  double x = *(volatile double *)addr;
-  if (abs_double(x - search_pos.x) >= MATCH)
-    return false;
-  double y = *(volatile double *)(addr + 8);
-  double z = *(volatile double *)(addr + 16);
-  bool all_zero;
-  if (abs_double(y - search_pos.y - PHYS_Y) < MATCH && abs_double(z - search_pos.z) < MATCH &&
-      !followed_by_copy(addr) && plausible_motion(addr + RECORD_POS_SIZE, &all_zero)) {
-    *error = abs_double(x - search_pos.x) + abs_double(y - search_pos.y - PHYS_Y) + abs_double(z - search_pos.z);
-    return true;
-  }
-  return false;
-}
-
-/* Scan on until a match (returns true, in `candidate`) or this frame's budget is used. */
-static bool scan_step(void)
-{
-  size_t budget = SCAN_PER_FRAME;
-  link_drawn_pos(&search_pos); /* where Link is now (he may be moving) */
-  while (scan_region < n_heap_regions && budget) {
-    /* the list is frames old: the game may have unmapped the region since */
-    sys_meminfo_t info;
-    if (sys_query_memory(&info, scan_pos) != 0 || (info.type & MEMORY_TYPE_MASK) != MEMORY_TYPE_NORMAL ||
-        (info.perm & (SYS_PERM_R | SYS_PERM_W)) != (SYS_PERM_R | SYS_PERM_W) ||
-        info.addr + info.size < heap_regions[scan_region].hi) {
-      if (++scan_region < n_heap_regions)
-        scan_pos = heap_regions[scan_region].lo;
-      continue;
-    }
-    uintptr_t end = heap_regions[scan_region].hi - RECORD_SPAN;
-    uintptr_t stop = scan_pos + budget < end ? scan_pos + budget : end;
-    for (uintptr_t p = scan_pos; p < stop; p += 8) {
-      double error;
-      if (record_matches(p, &error)) {
-        candidate.addr = p;
-        candidate.error = error;
-        bytes_scanned += p + 8 - scan_pos;
-        scan_pos = p + 8;
-        return true;
-      }
-    }
-    budget -= stop - scan_pos;
-    bytes_scanned += stop - scan_pos;
-    if (stop >= end) {
-      if (++scan_region < n_heap_regions)
-        scan_pos = heap_regions[scan_region].lo;
-    } else {
-      scan_pos = stop;
-    }
-  }
-  return false;
 }
 
 /* Position, then (if write_motion) the motion state with our velocity: requested velocity (z, x, y)
@@ -347,93 +159,40 @@ static void write_record(uintptr_t addr, double x, double y, double z, float vx,
   memcpy((void *)(addr + RECORD_POS_SIZE), motion, sizeof(motion));
 }
 
-static void search_failed(void)
+static bool record_at_follows_link(uintptr_t addr)
 {
-  requested = false; /* position.c sees REC_FAILED and says so */
-  if (!quiet_search)
-    gfx_notice("levitate: Link's position not found, try again");
-  search_state = SEARCH_FAILED;
-  retry_wait_frames = quiet_search ? RETRY_FRAMES * 2 : RETRY_FRAMES;
-}
-
-/* Lift the height only; the motion state (which the game needs to take the position while Link
- * stands) is written only where it's all zero, never over other data. */
-static void test_start(void)
-{
-  uintptr_t addr = candidate.addr;
-  bool motion_zero;
-  memcpy(saved_record, (void *)addr, sizeof(saved_record));
-  plausible_motion(addr + RECORD_POS_SIZE, &motion_zero);
-  link_drawn_pos(&test_start_pos);
-  const volatile uint32_t *motion = (const volatile uint32_t *)(addr + RECORD_POS_SIZE);
-  log_printf("levitate: testing %#lx (off by %.3f, motion %s: %08x %08x %08x %08x)", (unsigned long)addr,
-             candidate.error, motion_zero ? "zero" : "set", motion[0], motion[1], motion[2], motion[3]);
-  test_wrote_motion = motion_zero;
-  const volatile double *pos = (const volatile double *)addr;
-  write_record(addr, pos[0], pos[1] + TEST_LIFT, pos[2], 0, 0, 0, test_wrote_motion);
-  test_frames = 0;
-  n_tested++;
-  search_state = SEARCH_TESTING;
-}
-
-static void accept_by_handle(void)
-{
-  record = candidate.addr;
-  record_handle = search_handle;
-  record_has_motion = true;
-  last_found = record;
-  log_printf("levitate: Link's physics record is %#lx (by handle; scanned %u MiB)", (unsigned long)record,
-             (unsigned)(bytes_scanned >> 20));
-  search_state = SEARCH_READY;
-}
-
-static void test_step(void)
-{
-  vec3f_t now;
-  if (link_drawn_pos(&now) && now.y - test_start_pos.y > TEST_LIFT / 2) {
-    record = candidate.addr;
-    record_handle = 0;
-    record_has_motion = true;
-    last_found = record;
-    log_printf("levitate: Link's physics record is %#lx (moved him; scanned %u MiB)", (unsigned long)record,
-               (unsigned)(bytes_scanned >> 20));
-    search_state = SEARCH_READY;
-    return;
-  }
-  if (++test_frames < TEST_FRAMES)
-    return;
-  /* not Link's: put it back unless the game has rewritten it */
-  uintptr_t addr = candidate.addr;
-  double was_y;
-  memcpy(&was_y, saved_record + 8, 8);
-  if (abs_double(((volatile double *)addr)[1] - (was_y + TEST_LIFT)) < 1e-9)
-    memcpy((void *)addr, saved_record, test_wrote_motion ? sizeof(saved_record) : RECORD_POS_SIZE);
-  if (n_tested >= MAX_TESTS_PER_SEARCH) {
-    log_printf("levitate: %d matches didn't move Link", n_tested);
-    search_failed();
-    return;
-  }
-  search_state = SEARCH_FINDING; /* carry on scanning */
-}
-
-/* A respawn (a void, a death) moves Link's body to another entry. */
-static bool record_moved_away(void)
-{
-  if (!record_handle)
+  vec3f_t drawn;
+  if (!addr || (addr & 7) || !link_drawn_pos(&drawn) ||
+      !sys_mapped(addr, RECORD_SIZE, SYS_PERM_R | SYS_PERM_W))
     return false;
-  uint64_t now = cct_body_handle();
-  return *(volatile uint64_t *)(record + RECORD_HANDLE) != record_handle || (now && now != record_handle);
+  const volatile double *pos = (const volatile double *)addr;
+  return abs_double(pos[0] - drawn.x) < FOLLOW_TOLERANCE &&
+         abs_double(pos[2] - drawn.z) < FOLLOW_TOLERANCE &&
+         abs_double(pos[1] - drawn.y - PHYS_Y) < FOLLOW_TOLERANCE;
 }
 
 static bool record_follows_link(void)
 {
-  vec3f_t drawn;
-  if (!record || !link_drawn_pos(&drawn) || !sys_mapped(record, RECORD_SPAN, SYS_PERM_R | SYS_PERM_W) ||
-      record_moved_away())
-    return false;
-  volatile double *pos = (volatile double *)record;
-  return abs_double(pos[0] - drawn.x) < FOLLOW_TOLERANCE && abs_double(pos[2] - drawn.z) < FOLLOW_TOLERANCE &&
-         abs_double(pos[1] - drawn.y - PHYS_Y) < FOLLOW_TOLERANCE;
+  return record_at_follows_link(record);
+}
+
+static uintptr_t ensure_record(void)
+{
+  uintptr_t current = cct_motion_record();
+  if (!current || !sys_mapped(current, RECORD_SIZE, SYS_PERM_R | SYS_PERM_W)) {
+    record = 0;
+    return 0;
+  }
+  if (current == record)
+    return record;
+  if (!record_at_follows_link(current)) {
+    record = 0;
+    return 0;
+  }
+  record = current;
+  record_has_motion = true;
+  log_printf("levitate: Link's physics record is %#lx", (unsigned long)record);
+  return record;
 }
 
 /* --- shared helpers ----------------------------------------------------------------------------- */
@@ -530,7 +289,7 @@ static void drop(void)
      * Never change position, horizontal motion or the full WAKE search_state here.
      * Revalidate here: L3 is handled before this frame's normal record-loss check. */
     bool zero;
-    if (search_state == SEARCH_READY && record_has_motion && record_follows_link() &&
+    if (record && record_has_motion && record_follows_link() &&
         plausible_motion(record + 24, &zero)) {
       *(volatile float *)(record + 0x2C) = 0; /* requested y velocity */
       *(volatile float *)(record + 0x44) = 0; /* post-collision y velocity */
@@ -1061,76 +820,33 @@ static void handle_l3(bool menu_open)
       gfx_notice("levitate: not in a loading zone");
     } else {
       floating = true;
-      quiet_search = false;
       gfx_notice("levitate on");
     }
   }
-}
-
-/* Advance a running search. True while one runs: nothing else happens on those frames. */
-static bool search_running(void)
-{
-  if (search_state == SEARCH_FINDING) {
-    if (scan_step()) {
-      if (search_handle)
-        accept_by_handle();
-      else
-        test_start();
-    } else if (scan_region >= n_heap_regions) {
-      log_printf("levitate: no match in %u MiB of heap (%d tested)", (unsigned)(bytes_scanned >> 20), n_tested);
-      search_failed();
-    }
-    if (search_state == SEARCH_FAILED)
-      floating = false;
-    return true;
-  }
-  if (search_state == SEARCH_TESTING) {
-    test_step();
-    if (search_state == SEARCH_FAILED)
-      floating = false;
-    return true;
-  }
-  return false;
 }
 
 /* --- Link's record, for position.c ------------------------------------------------------------- */
 
 link_record_status_t link_record_status(void)
 {
-  switch (search_state) {
-    case SEARCH_READY: return REC_READY;
-    case SEARCH_FINDING: case SEARCH_TESTING: return REC_SEARCHING;
-    case SEARCH_FAILED: return REC_FAILED;
-    default: return requested ? REC_SEARCHING : REC_NONE;
-  }
-}
-
-void link_record_request(void)
-{
-  if (search_state == SEARCH_READY)
-    return;
-  if (search_state == SEARCH_FAILED) /* asked again: search again now */
-    search_state = SEARCH_IDLE;
-  requested = true;
+  return ensure_record() ? REC_READY : REC_NONE;
 }
 
 /* One write of the record's turn (RECORD_TURN): Link turns by that much and stays turned. */
 bool link_record_turn(double radians)
 {
-  if (search_state != SEARCH_READY || !record_has_motion ||
-      !sys_mapped(record, RECORD_SPAN, SYS_PERM_R | SYS_PERM_W) || record_moved_away())
+  if (!ensure_record() || !record_has_motion)
     return false;
   *(volatile float *)(record + RECORD_TURN) = (float)(radians * 60.0);
   return true;
 }
 
-/* Position, plus the motion state (record_has_motion: the test that found it wrote there safely): the
- * game ignores a new position while Link stands unless that's written too, and standing leaves small
- * leftovers in it, so it's rarely all zero (game.py's move wrote it every time too). */
+/* Position, plus the motion state: the game ignores a new position while Link stands unless that's
+ * written too, and standing leaves small leftovers in it, so it's rarely all zero (game.py's move
+ * wrote it every time too). */
 bool link_record_move(double x, double y, double z, float face_vx, float face_vz, int settle_frames)
 {
-  if (search_state != SEARCH_READY || !sys_mapped(record, RECORD_SPAN, SYS_PERM_R | SYS_PERM_W) ||
-      record_moved_away())
+  if (!ensure_record())
     return false;
   write_record(record, x, y + PHYS_Y, z, face_vx, 0, face_vz, record_has_motion);
   if (moving_link) { /* floating: carry on from there */
@@ -1151,8 +867,7 @@ bool link_record_move(double x, double y, double z, float face_vx, float face_vz
 void link_record_resync(void)
 {
   vec3f_t drawn;
-  if (search_state != SEARCH_READY || !link_drawn_pos(&drawn) ||
-      !sys_mapped(record, RECORD_SPAN, SYS_PERM_R | SYS_PERM_W) || record_moved_away())
+  if (!ensure_record() || !link_drawn_pos(&drawn))
     return;
   volatile double *pos = (volatile double *)record;
   pos[0] = drawn.x;
@@ -1179,23 +894,18 @@ static void frame(bool menu_open)
   protect_landing(menu_open);
   handle_l3(menu_open);
 
-  if (search_running())
-    return;
-  if (search_state == SEARCH_FAILED && --retry_wait_frames <= 0)
-    search_state = SEARCH_IDLE;
-
+  uintptr_t current = cct_motion_record();
+  bool current_ok = current && sys_mapped(current, RECORD_SIZE, SYS_PERM_R | SYS_PERM_W);
   /* Unmapped or moved away is lost even during a hold or a freeze: the next write would land in freed
    * memory or in another body. */
-  bool mapped = search_state == SEARCH_READY && sys_mapped(record, RECORD_SPAN, SYS_PERM_R | SYS_PERM_W);
-  bool moved_away = mapped && record_moved_away();
-  if (search_state == SEARCH_READY &&
-      (!mapped || moved_away || (!hold_frames && !record_follows_link() && !(moving_link && frozen_frames)))) {
+  bool mapped = record && current == record && current_ok;
+  bool moved_away = record && current_ok && current != record;
+  if (record && (!mapped || moved_away || (!hold_frames && !record_follows_link() && !(moving_link && frozen_frames)))) {
     log_printf(moved_away ? "levitate: Link's body moved to another entry (respawn?)"
                           : "levitate: lost Link's record (new area?)");
     if (floating)
       gfx_notice("levitate off: Link was moved");
     record = 0;
-    search_state = SEARCH_IDLE;
     moving_link = false;
     floating = false;
     speed_known = false;
@@ -1205,13 +915,16 @@ static void frame(bool menu_open)
 
   bool want_speed = cheats[CHEAT_SPEED] && !floating && !menu_open;
   bool want_walls = cheats[CHEAT_WALLS] && !floating && !menu_open && !in_exit;
-  if (search_state == SEARCH_READY)
-    requested = false;
-  if (search_state == SEARCH_IDLE && (floating || want_speed || want_walls || requested)) {
-    search_start(!floating);
-    return;
+  if (!record && current_ok && record_at_follows_link(current)) {
+    record = current;
+    record_has_motion = true;
+    log_printf("levitate: Link's physics record is %#lx", (unsigned long)record);
   }
-  if (search_state != SEARCH_READY) {
+  if (!record) {
+    if (floating) {
+      floating = false;
+      gfx_notice("levitate: Link's position not found, try again");
+    }
     speed_known = false;
     walls_known = false;
     walls_stop();
@@ -1270,17 +983,9 @@ bool levitate_floating(void)
 
 const char *levitate_state(void)
 {
-  switch (search_state) {
-    case SEARCH_FINDING:
-    case SEARCH_TESTING:
-      return "finding Link";
-    case SEARCH_FAILED:
-      return "not found";
-    default:
-      if (moving_link)
-        return "floating";
-      if (floating)
-        return "starting";
-      return record ? "ready" : "off";
-  }
+  if (moving_link)
+    return "floating";
+  if (floating)
+    return "starting";
+  return link_record_status() == REC_READY ? "ready" : "off";
 }

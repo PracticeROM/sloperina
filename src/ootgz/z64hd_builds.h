@@ -78,6 +78,8 @@ static const struct z64hd_build z64hd_builds[] = {
     .cct_force_no_hit = 0x1A9C00,
     .cct_set_position = 0x6D7730,
     .cct_set_velocity = 0x1ED800,
+    .phive_mgr_ptr = 0x4C18258,
+    .vt_autosave = 0x4B3B5F8,
     /* v131072's 0x5F88C0, found through ExecuteEventPlayerImmediateRagdollDown's enter (identical in both);
      * the holder chain, the hit component and level, the controller's reaction / state and the player's
      * fields that ragdoll.c reads are at the same offsets as v131072's */
@@ -150,8 +152,9 @@ static const struct z64hd_build z64hd_builds[] = {
     .cct_force_no_hit = 0x158D40,
     .cct_set_position = 0x6B2530,
     .cct_set_velocity = 0x12DBE0,
+    .phive_mgr_ptr = 0x4C7DF00,
     .scene_mgr_ptr = 0x4E97648,
-    .autosave_update = 0x32762B0,
+    .vt_autosave = 0x4BA0848,
     .safety_search = 0x945310,
     .voxel_mgr_ptr = 0x4C7DF00,
     .voxel_formats = 0x3EE8840,

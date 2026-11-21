@@ -20,12 +20,13 @@ static uintptr_t function_at(unsigned offset)
 #define MAIN_FN(type, off) ((type)function_at(off))
 #include "../src/ootgz/cct.c"
 
-static uint64_t objects[12][1024]; /* 11: a second body */
+static uint64_t objects[24][1024]; /* 11: second body; 12: main; 13..22: phive/havok chain */
+#define N_OBJECTS (sizeof(objects) / sizeof(objects[0]))
 #define A(n) ((uintptr_t)objects[n])
-uintptr_t z64hd_main = 0x100000000ull;
+uintptr_t z64hd_main;
 static const struct z64hd_build test_build = {
   .vt_cct_property = 0x4C34F10, .vt_cct_body = 0x4C34658, .cct_force_no_hit = 0x158D40,
-  .cct_set_position = 0x6B2530, .cct_set_velocity = 0x12DBE0,
+  .cct_set_position = 0x6B2530, .cct_set_velocity = 0x12DBE0, .phive_mgr_ptr = 0x100,
 };
 const struct z64hd_build *z64hd_game = &test_build;
 static uintptr_t actor, blocked;
@@ -38,7 +39,7 @@ uintptr_t link_actor(void) { return actor; }
 bool sys_mapped(uintptr_t a, size_t n, uint32_t perm)
 {
   if (n > UINTPTR_MAX - a || (read_only && (perm & SYS_PERM_W))) return false;
-  for (unsigned i = 0; i < 12; i++)
+  for (unsigned i = 0; i < N_OBJECTS; i++)
     if (a >= A(i) && a + n <= A(i) + sizeof(objects[i]) && A(i) != blocked) return true;
   return false;
 }
@@ -109,7 +110,7 @@ static void test_fall(void)
   assert(*(float *)(A(9) + 0x18D4) == y && *(float *)(A(9) + 0x18E0) == y);
   assert(*(float *)(A(9) + 0x190C) == 0 && *(float *)(A(10) + 0x189C) == 0);
   assert(*(float *)(A(10) + 0x1898) == y && *(uint32_t *)(A(9) + 0x18E8) == 0x7F7FFFFF);
-  static uint64_t before[12][1024];
+  static uint64_t before[24][1024];
   for (int invalid = 0; invalid < 4; invalid++) {
     reset();
     if (invalid == 0) blocked = A(9);
@@ -122,9 +123,70 @@ static void test_fall(void)
   }
   puts("PASS: terminal velocity reset, horizontal motion preserved, ground state and fall-history guards");
 }
+static void setup_havok(unsigned world_idx, uint32_t body_id, uint32_t body_cap, uint32_t motion_id,
+                        uint32_t motion_cap)
+{
+  uint32_t body_idx = body_id & 0xFFFFFFu;
+  putp(12, test_build.phive_mgr_ptr, A(13));
+  putp(13, 0, A(14));
+  putp(14, 0xC0, A(15));
+  putp(15, 0xC8 + world_idx * 8u, A(16));
+  putp(16, 0xE0, A(17));
+  putp(6, 0x70, (uint64_t)world_idx << 5);
+  putp(6, 0x78, A(22));
+  putp(22, 0x8, body_id);
+  put32(17, 0x130, body_cap);
+  putp(17, 0x48, A(18));
+  putp(18, (body_idx / 42u) * 8u, A(19));
+  unsigned b_off = (body_idx % 42u) * 0xC0u;
+  putp(19, b_off + 0xB8, A(6));
+  put32(19, b_off + 0x80, motion_id);
+  put32(17, 0x798, motion_cap);
+  putp(17, 0x708, A(20));
+  putp(20, (motion_id >> 6) * 8u, A(21));
+  unsigned m_off = (motion_id & 0x3Fu) * 0x80u;
+  put32(21, m_off + 0x60, body_id);
+}
+static void test_motion_record(void)
+{
+  reset();
+  setup_havok(0, 0x0700002Bu, 64, 65, 128); /* body block 1 slot 1 (43), motion block 1 slot 1 (65) */
+  assert(cct_motion_record() == A(21) + 0x80u + 0x10u);
+
+  reset();
+  setup_havok(1, 0x02000005u, 10, 3, 8); /* world_idx = 1 */
+  assert(cct_motion_record() == A(21) + 3u * 0x80u + 0x10u);
+
+  for (int i = 12; i <= 22; i++) {
+    reset(); setup_havok(0, 0x0700002Bu, 64, 65, 128);
+    blocked = A(i);
+    assert(cct_motion_record() == 0);
+  }
+  reset(); setup_havok(0, 0x0700002Bu, 64, 65, 128);
+  read_only = true; assert(cct_motion_record() == 0);
+  reset(); setup_havok(0, 0x0700002Bu, 64, 65, 128);
+  putp(22, 0x8, ~0ull); assert(cct_motion_record() == 0);
+  putp(22, 0x8, 0x01FFFFFFull); assert(cct_motion_record() == 0);
+  reset(); setup_havok(0, 0x0700002Bu, 43, 65, 128); /* body_idx == body_cap */
+  assert(cct_motion_record() == 0);
+  reset(); setup_havok(0, 0x0700002Bu, 64, 65, 128);
+  putp(19, 0xC0u + 0xB8u, A(11)); assert(cct_motion_record() == 0); /* wrong body backpointer */
+  reset(); setup_havok(0, 0x0700002Bu, 64, 0, 128); /* motion_id == 0 */
+  assert(cct_motion_record() == 0);
+  reset(); setup_havok(0, 0x0700002Bu, 64, 65, 128);
+  put32(19, 0xC0u + 0x80u, 0x7FFFFFFFu); assert(cct_motion_record() == 0);
+  put32(19, 0xC0u + 0x80u, 128u); assert(cct_motion_record() == 0); /* motion_id == motion_cap */
+  put32(19, 0xC0u + 0x80u, 65u);
+  put32(17, 0x798, 0x80000000u); assert(cct_motion_record() == 0); /* signed negative motion_cap */
+  put32(17, 0x798, 128u);
+  put32(21, 0x80u + 0x60u, 0x0800002Bu); assert(cct_motion_record() == 0); /* wrong body_id on motion */
+  puts("PASS: direct Havok hknpBody/hknpMotion lookup, world 0/1, block math and bounds/backpointer guards");
+}
 int main(void)
 {
+  z64hd_main = A(12);
   test_fall();
+  test_motion_record();
   vec3f_t p = { 2, 100, -3 };
   reset(); assert(cct_noclip_begin() && toggles == 1);
   assert(cct_noclip_begin() && toggles == 1);

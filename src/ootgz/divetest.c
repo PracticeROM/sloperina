@@ -106,7 +106,6 @@ void divetest_toggle(int which)
   test = which >= 0 && which < DIVETEST_COUNT ? which : DIVETEST_HEIGHTS;
   state = DT_FIND;
   step = 0;
-  link_record_request();
   gfx_logf("dive test: close the menu with Link swimming at the surface");
 }
 
@@ -155,13 +154,8 @@ void divetest_frame(bool menu_open)
     return;
   switch (state) {
     case DT_FIND:
-      if (link_record_status() == REC_READY) {
+      if (link_record_status() == REC_READY)
         start_surface();
-      } else if (link_record_status() == REC_FAILED) {
-        stop("couldn't find Link's physics record; try again after moving a little");
-      } else {
-        link_record_request();
-      }
       break;
     case DT_SURFACE: /* Link still at the surface: its height there */
       still_min = pos.y < still_min ? pos.y : still_min;

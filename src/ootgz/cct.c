@@ -1,5 +1,5 @@
 /* Use the same physics APIs as OneShotPhysicsCctChangePosition and
- * OneshotChangeForceNoHitMode. Writing a scanned position record alone leaves the
+ * OneshotChangeForceNoHitMode. Writing the position record alone leaves the
  * collision solver active and can disagree with the controller's other transforms.
  * This module changes neither code nor collision geometry. */
 #include "cct.h"
@@ -63,23 +63,70 @@ static bool resolve(controller_t *out)
   return true;
 }
 
-/* The object just before the property in the controller chain holds the body's ID; a body entry's
- * handle is that ID under a fixed tag. */
-#define BODY_ID 0x160
-#define BODY_HANDLE_TAG 0x5F7F3DCDull
-
-uint64_t cct_body_handle(void)
+/* Link's live Havok motion record (hknpMotion + 0x10: position doubles + 48-byte motion state),
+ * resolved directly from the controller body through phive::PhysicsMgr and hknpWorld. */
+uintptr_t cct_motion_record(void)
 {
-  if (!z64hd_game || !Z64HD_VT_CCT_PROPERTY)
+  if (!z64hd_game || !z64hd_game->phive_mgr_ptr || !Z64HD_VT_CCT_PROPERTY || !Z64HD_VT_CCT_BODY)
     return 0;
   uintptr_t p = link_actor();
-  static const unsigned offsets[] = { 0x270, 0x50, 0x20, 0x10 };
+  static const unsigned offsets[] = { 0x270, 0x50, 0x20, 0x10, 8 };
   for (unsigned i = 0; i < sizeof(offsets) / sizeof(*offsets); i++)
     p = next(p, offsets[i]);
-  uint32_t id;
-  if (!p || sys_ptr(next(p, 8)) != MAIN(Z64HD_VT_CCT_PROPERTY) || !sys_read32(p + BODY_ID, &id) || !id)
+  uintptr_t body = next(p, 0x20);
+  if (!p || !body || (body & 7) ||
+      sys_ptr(p) != MAIN(Z64HD_VT_CCT_PROPERTY) || sys_ptr(body) != MAIN(Z64HD_VT_CCT_BODY))
     return 0;
-  return BODY_HANDLE_TAG << 32 | id;
+  if (!sys_mapped(body + 0x70, 8, SYS_PERM_R))
+    return 0;
+  uint64_t flags = *(const volatile uint64_t *)(body + 0x70);
+  unsigned world_idx = (unsigned)((flags >> 5) & 1u);
+  uintptr_t handle = next(body, 0x78);
+  if (!handle || (handle & 7) || handle > UINTPTR_MAX - 16 || !sys_mapped(handle + 8, 8, SYS_PERM_R))
+    return 0;
+  uint64_t raw_id = *(const volatile uint64_t *)(handle + 8);
+  if (raw_id == ~0ull)
+    return 0;
+  uint32_t body_id = (uint32_t)raw_id;
+  uint32_t body_idx = body_id & 0xFFFFFFu;
+  if (body_idx == 0xFFFFFFu)
+    return 0;
+
+  uintptr_t phive_holder = sys_ptr(MAIN(z64hd_game->phive_mgr_ptr));
+  uintptr_t phive_mgr = phive_holder ? sys_ptr(phive_holder) : 0;
+  uintptr_t phive_world = next(phive_mgr, 0xC0);
+  uintptr_t world_wrap = next(phive_world, 0xC8 + (size_t)world_idx * sizeof(uintptr_t));
+  uintptr_t world = next(world_wrap, 0xE0);
+  if (!world || world > UINTPTR_MAX - 0x7A0u)
+    return 0;
+
+  uint32_t body_cap;
+  if (!sys_read32(world + 0x130, &body_cap) || body_idx >= body_cap)
+    return 0;
+  uintptr_t body_blocks = next(world, 0x48);
+  uintptr_t body_block = next(body_blocks, (size_t)(body_idx / 42u) * sizeof(uintptr_t));
+  if (!body_block || body_block > UINTPTR_MAX - 0x2000u)
+    return 0;
+  uintptr_t hknp_body = body_block + (size_t)(body_idx % 42u) * 0xC0u;
+  if (next(hknp_body, 0xB8) != body)
+    return 0;
+
+  uint32_t motion_id, motion_cap;
+  if (!sys_read32(hknp_body + 0x80, &motion_id) || motion_id == 0 || motion_id >= 0x7FFFFFFFu)
+    return 0;
+  if (!sys_read32(world + 0x798, &motion_cap) || (int32_t)motion_cap <= 0 || motion_id >= motion_cap)
+    return 0;
+  uintptr_t motion_blocks = next(world, 0x708);
+  uintptr_t motion_block = next(motion_blocks, (size_t)(motion_id >> 6) * sizeof(uintptr_t));
+  if (!motion_block || motion_block > UINTPTR_MAX - 0x2000u)
+    return 0;
+  uintptr_t hknp_motion = motion_block + (size_t)(motion_id & 0x3Fu) * 0x80u;
+  uint32_t first_body;
+  if (!sys_read32(hknp_motion + 0x60, &first_body) || first_body != body_id)
+    return 0;
+
+  uintptr_t record = hknp_motion + 0x10;
+  return writable(record, 0x48) ? record : 0;
 }
 
 static bool same(controller_t a, controller_t b)
@@ -121,7 +168,7 @@ bool cct_set_vertical_velocity(uintptr_t expected_actor, float y)
     return false;
   /* The game's vertical-gravity reducer reads this same applied velocity and
    * uses this setter (main+0x278AA90). The setter locks and queues the change;
-   * writing the scanned Havok record leaves this velocity at terminal speed. */
+   * writing the Havok record leaves this velocity at terminal speed. */
   vec3f_t v = *(volatile vec3f_t *)(current.body + 0xE0);
   if (!(v.x > -10000 && v.x < 10000 && v.z > -10000 && v.z < 10000))
     return false;

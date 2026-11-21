@@ -66,8 +66,6 @@ uint64_t sys_tick_freq(void)
 
 #define NULL_PAGE_END    0x1000 /* never mapped: anything below is a bad pointer */
 #define MEM_TYPE_UNMAPPED 0
-#define MEM_ATTR_LOCKED   0x1    /* locked/borrowed */
-#define MAX_REGIONS      100000 /* stops a region walk that never ends */
 
 /* The regions last queried (size 0: none), forgotten each frame (sys_frame). A frame's reads go back and
  * forth between a few of them (main's data, the heap, the module's own), so one remembered region was asked
@@ -118,22 +116,6 @@ bool sys_read32(uintptr_t addr, uint32_t *out)
     return false;
   *out = *(volatile uint32_t *)addr;
   return true;
-}
-
-void sys_regions(uint32_t perm, void (*fn)(uintptr_t, size_t, void *), void *ctx)
-{
-  sys_meminfo_t region;
-  uint64_t addr = 0;
-  for (int guard = 0; guard < MAX_REGIONS; guard++) {
-    if (sys_query_memory(&region, addr) != 0 || region.size == 0)
-      break;
-    if (region.type != MEM_TYPE_UNMAPPED && (region.perm & perm) == perm && !(region.attr & MEM_ATTR_LOCKED))
-      fn((uintptr_t)region.addr, (size_t)region.size, ctx);
-    uint64_t next = region.addr + region.size;
-    if (next <= addr)
-      break;
-    addr = next;
-  }
 }
 
 /* --- logging --------------------------------------------------------------------------- */

@@ -32,7 +32,6 @@ bool      gd_ready(void);           /* manager present and the Int fields look v
  * objects: object i is at objects + i * stride, its value at + value_off (a copy follows it). */
 gd_type_t *gd_type(gd_kind_t kind);
 void      gd_layout(gd_kind_t kind, uint32_t *stride, uint32_t *value_off);
-void      gd_reset(void);           /* forget cached type entries (call on save load) */
 
 /* Int: through the game's own GetInt/SetInt (SetInt is queued and applied at the flush). */
 bool      gd_get_int(uint32_t hash, int32_t *out);

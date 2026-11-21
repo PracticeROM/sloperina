@@ -54,19 +54,17 @@ static const struct {
 #define MAX_FIELD_COUNT     0x10000
 #define MAX_HASH_TABLE_SIZE 0x100000
 
-
-static uint32_t type_entry_off[GD_NTYPES]; /* offset of each type entry in the manager; 0 = not found */
+static const uint32_t type_offsets[GD_NTYPES] = {
+  [GD_INT]   = Z64HD_GD_INT_TYPE,
+  [GD_BOOL]  = Z64HD_GD_BOOL_TYPE,
+  [GD_FLOAT] = Z64HD_GD_FLOAT_TYPE,
+  [GD_ENUM]  = Z64HD_GD_ENUM_TYPE,
+};
 
 void *gd_manager(void)
 {
   uintptr_t holder = sys_ptr(MAIN(z64hd_game->gd_mgr_ptr));
   return (void *)(holder ? sys_ptr(holder) : 0);
-}
-
-void gd_reset(void)
-{
-  for (int i = 0; i < GD_NTYPES; i++)
-    type_entry_off[i] = 0;
 }
 
 static bool type_plausible(const gd_type_t *type)
@@ -80,38 +78,27 @@ static bool type_plausible(const gd_type_t *type)
          sys_mapped((uintptr_t)type->objects, 8, SYS_PERM_R | SYS_PERM_W);
 }
 
-/* The manager's type entry for `kind`: Int at its fixed offset, the others found by vtable
- * (the offset is cached). */
+/* The manager's type entry for `kind`, at its fixed offset. */
 static gd_type_t *find_type_entry(gd_kind_t kind)
 {
+  if (kind >= GD_NTYPES)
+    return 0;
   uint8_t *mgr = gd_manager();
   if (!mgr)
     return 0;
-  if (kind == GD_INT)
-    return type_plausible((gd_type_t *)(mgr + Z64HD_GD_INT_TYPE)) ?
-           (gd_type_t *)(mgr + Z64HD_GD_INT_TYPE) : 0;
-  const uint32_t vtable_offsets[GD_NTYPES] = {
-    [GD_BOOL] = z64hd_game->vt_bool_type,
-    [GD_FLOAT] = z64hd_game->vt_float_type,
-    [GD_ENUM] = z64hd_game->vt_enum_type,
-  };
-  uintptr_t vtable = MAIN(vtable_offsets[kind]);
-  if (!sys_mapped((uintptr_t)mgr, Z64HD_GD_TYPES_SCAN + sizeof(gd_type_t), SYS_PERM_R))
+  gd_type_t *type = (gd_type_t *)(mgr + type_offsets[kind]);
+  if (!type_plausible(type))
     return 0;
-  if (type_entry_off[kind]) {
-    gd_type_t *type = (gd_type_t *)(mgr + type_entry_off[kind]);
-    if (type->vtable == vtable && type_plausible(type))
-      return type;
-    type_entry_off[kind] = 0;
+  if (kind != GD_INT) {
+    const uint32_t vtable_offsets[GD_NTYPES] = {
+      [GD_BOOL]  = z64hd_game->vt_bool_type,
+      [GD_FLOAT] = z64hd_game->vt_float_type,
+      [GD_ENUM]  = z64hd_game->vt_enum_type,
+    };
+    if (type->vtable != MAIN(vtable_offsets[kind]))
+      return 0;
   }
-  for (uint32_t offset = 0; offset < Z64HD_GD_TYPES_SCAN; offset += 8) {
-    gd_type_t *type = (gd_type_t *)(mgr + offset);
-    if (type->vtable == vtable && type_plausible(type)) {
-      type_entry_off[kind] = offset;
-      return type;
-    }
-  }
-  return 0;
+  return type;
 }
 
 gd_type_t *gd_type(gd_kind_t kind)

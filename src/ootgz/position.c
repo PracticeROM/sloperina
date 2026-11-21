@@ -1,17 +1,14 @@
 /* Save / load position (gz).
  *
  * Saving reads Link's drawn position, his facing and the map. Moving him back goes through his
- * physics record (levitate.c), which has to be found first in each area: a heap scan that test-lifts
- * the matches, a second or two. The first save (or load) in an area starts that search and says so
- * ("Locating Link's starting position"), rather than acting later out of the blue; the next press works.
- * Saving needs the record so that the load after it is instant.
+ * physics record (levitate.c), which resolves directly from his controller.
  *
  * A load waits until R and the d-pad of the shortcut are let go: holding R brings up the game's item
  * wheel, which freezes gameplay, and a frozen Link ignores a new position (every load made while they
  * were held failed). "loading position" shows at once, as "position saved" does (saving only reads, so
  * it doesn't wait), and "position loaded" when he's there. It's then checked: done once
  * Link is drawn there; otherwise written again a few times, and if it never takes, the record is put
- * back where Link is (so it isn't "lost" and searched for again). While it settles, the game's stores
+ * back where Link is. While it settles, the game's stores
  * can't move X, Y or Z (lock.c), so the game can't pull him off the write. */
 #include "position.h"
 
@@ -33,7 +30,6 @@ static bool saved;
 static double sx, sy, sz, sfx, sfz; /* drawn position; facing as a unit (x, z) */
 static char smap[64];
 
-static bool finding;  /* a press asked levitate.c for the record: say when it's found or not */
 static bool pending;  /* load pressed: waiting for the buttons to be let go */
 static int settle;    /* frames left to see Link arrive */
 static int writes;
@@ -53,21 +49,8 @@ static bool in_saved_map(void)
   return !m || !smap[0] || same_str(m, smap);
 }
 
-/* the record isn't known yet: ask for it and say so; the next press, once it's found, works */
-static bool need_record(void)
-{
-  if (link_record_status() == REC_READY)
-    return false;
-  link_record_request();
-  finding = true;
-  gfx_notice("Locating Link's starting position, please try again");
-  return true;
-}
-
 void position_save(void)
 {
-  if (need_record())
-    return;
   vec3f_t p;
   if (!link_drawn_pos(&p)) {
     gfx_notice("save position: Link not found");
@@ -99,8 +82,10 @@ void position_load(void)
     gfx_notice("the saved position is in another map");
     return;
   }
-  if (need_record())
+  if (link_record_status() != REC_READY) {
+    gfx_notice("load position: Link not found");
     return;
+  }
   pending = true;
   gfx_notice("loading position"); /* now, while the wheel's up; "position loaded" once he's there */
 }
@@ -174,16 +159,7 @@ void position_frame(bool menu_open)
   else if (!menu_open && cmd_pressed(CMD_LOADPOS)) /* R + d-down */
     position_load();
 
-  link_record_status_t st = link_record_status();
-  if (finding && st == REC_READY) {
-    finding = false;
-    gfx_notice("found Link's position: save / load position ready");
-  } else if (finding && st == REC_FAILED) {
-    finding = pending = false;
-    gfx_notice("Link's position not found, move around and try again");
-  }
-
-  if (pending && st == REC_READY && !(input_held() & cmd_mask(CMD_LOADPOS))) {
+  if (pending && link_record_status() == REC_READY && !(input_held() & cmd_mask(CMD_LOADPOS))) {
     pending = false;
     writes = 0;
     lock_hold_set(true); /* the write holds: the game's stores can't pull him off it while it settles */
