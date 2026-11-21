@@ -16,6 +16,7 @@
 #include "sdfs.h"
 #include "settings.h"
 #include "sys.h"
+#include "z64hd.h"
 
 bool save_backup_enabled;
 bool save_backup_location;
@@ -658,6 +659,72 @@ const char *savestates_apply(int index)
   }
   __atomic_store_n(&busy, 0, __ATOMIC_RELEASE);
   return out;
+}
+
+/* ---- main's memory on the SD card (for reverse engineering) ----------------
+ * main.bin: the image from main's load address (the code, read-only data, data and bss; 1.0.0's NSO maps 0x4E20000
+ * bytes up to the end of its bss), main.base: that address in hex. Pages that aren't mapped are written as zeros,
+ * so the file keeps the layout. Runs on the game's thread and takes a few seconds. */
+#define DUMP_MAIN_SIZE 0x4E20000u
+#define DUMP_MAIN_BIN SD_DIR "/main.bin"
+#define DUMP_MAIN_BASE SD_DIR "/main.base"
+#define DUMP_PAGE 0x1000u
+#define DUMP_CHUNK COPY_CHUNK /* the work buffer's size; it divides DUMP_MAIN_SIZE */
+
+const char *savestates_dump_main(void)
+{
+  state_result[0] = 0;
+  if (!settings_sd())
+    return refuse("no SD card access"); /* not menu text */
+  if (__atomic_exchange_n(&busy, 1, __ATOMIC_ACQUIRE))
+    return refuse("a copy is already running"); /* not menu text */
+  error[0] = 0;
+  uintptr_t base = MAIN(0);
+  fs_create_dir(SD_DIR);
+  fs_file_t out;
+  nn_result_t r;
+  fs_delete_file(DUMP_MAIN_BIN);
+  if ((r = fs_create_file(DUMP_MAIN_BIN, DUMP_MAIN_SIZE)) != 0 || (r = fs_open(&out, DUMP_MAIN_BIN, FS_WRITE)) != 0) {
+    fail("couldn't make", DUMP_MAIN_BIN, r); /* not menu text */
+  } else {
+    static _Alignas(8) uint8_t zeros[DUMP_PAGE];
+    for (uint32_t at = 0; at < DUMP_MAIN_SIZE && !error[0]; at += DUMP_CHUNK) {
+      uint32_t n = DUMP_MAIN_SIZE - at < DUMP_CHUNK ? DUMP_MAIN_SIZE - at : DUMP_CHUNK;
+      /* copy page by page into the work buffer: a page that isn't readable becomes zeros */
+      for (uint32_t p = 0; p < n; p += DUMP_PAGE) {
+        if (sys_mapped(base + at + p, DUMP_PAGE, SYS_PERM_R))
+          memcpy(chunk + p, (const void *)(base + at + p), DUMP_PAGE);
+        else
+          memcpy(chunk + p, zeros, DUMP_PAGE);
+      }
+      fs_write_option_t flush = { at + n >= DUMP_MAIN_SIZE ? FS_WRITE_FLUSH : 0 };
+      if ((r = fs_write(out, at, chunk, n, &flush)) != 0)
+        fail("couldn't write", DUMP_MAIN_BIN, r); /* not menu text */
+    }
+    fs_close(out);
+  }
+  if (!error[0]) {
+    char text[32];
+    int len = snprintf(text, sizeof(text), "%llx", (unsigned long long)base);
+    fs_delete_file(DUMP_MAIN_BASE);
+    if ((r = fs_create_file(DUMP_MAIN_BASE, len)) != 0 || (r = fs_open(&out, DUMP_MAIN_BASE, FS_WRITE)) != 0) {
+      fail("couldn't make", DUMP_MAIN_BASE, r); /* not menu text */
+    } else {
+      fs_write_option_t flush = { FS_WRITE_FLUSH };
+      if ((r = fs_write(out, 0, text, (size_t)len, &flush)) != 0)
+        fail("couldn't write", DUMP_MAIN_BASE, r); /* not menu text */
+      fs_close(out);
+    }
+  }
+  const char *res = 0;
+  if (error[0]) {
+    snprintf(state_result, sizeof(state_result), "%s", error);
+    res = state_result;
+  } else {
+    snprintf(state_result, sizeof(state_result), "main.bin and main.base are in the sloperinaGZ folder on the SD card"); /* not menu text */
+  }
+  __atomic_store_n(&busy, 0, __ATOMIC_RELEASE);
+  return res;
 }
 
 /* ---- EXPERIMENTAL: a progress.sav rebuilt from the live game ----------------

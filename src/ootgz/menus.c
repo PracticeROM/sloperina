@@ -3523,7 +3523,7 @@ static void build_root(void)
 static int states_built = -1;
 /* the rows that aren't saves: category, page, the three tools and return (6), the title and its gap (2), the gap
  * above the hint (1), the hint (3), the status line and its gap (2) */
-#define STATES_ROWS_AROUND 14
+#define STATES_ROWS_AROUND 15
 
 static void act_state_apply(menu_item_t *it)
 {
@@ -3553,6 +3553,15 @@ static void act_state_experimental(menu_item_t *it)
 static void act_state_rescan(menu_item_t *it)
 {
   savestates_scan();
+}
+
+/* writes main's memory to the SD card, for reverse engineering (savestates_dump_main) */
+static void act_state_dump_main(menu_item_t *it)
+{
+  gfx_notice("dumping main to the SD card, wait a few seconds...");
+  const char *err = savestates_dump_main();
+  log_printf("save manager: %s", savestates_result());
+  gfx_notice(err ? "dump failed: see the line under the list" : "main dumped to the SD card");
 }
 
 static int get_state_category(menu_item_t *it)
@@ -3625,6 +3634,9 @@ static void rebuild_savestates(void)
   it = menu_add_action(&m_states, "refresh list", act_state_rescan, 0);
   if (it)
     it->hint = "Read the saves folder again, after adding, renaming or deleting some in your file explorer.";
+  it = menu_add_action(&m_states, "dump main (debug)", act_state_dump_main, 0);
+  if (it)
+    it->hint = "Writes main.bin and main.base to the sloperinaGZ folder on the SD card. Takes a few seconds.";
   menu_add_return(&m_states);
   menu_add_text(&m_states, text_states, 0);
   m_states.footer = 1;

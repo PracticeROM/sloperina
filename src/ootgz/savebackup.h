@@ -48,6 +48,9 @@ const char *savestates_apply(int i);   /* 0 when done, else what went wrong (als
  * save's progress.sav is then brought up to date from the live game data and Link's position (EXPERIMENTAL) */
 const char *savestates_dump(const char *name, bool experimental);
 const char *savestates_result(void);   /* what the last apply/dump did, or why it couldn't */
+/* For reverse engineering: writes main's memory to sd:/sloperinaGZ/main.bin and its load address (hex text) to
+ * sd:/sloperinaGZ/main.base; 0 when done, else what went wrong (also in savestates_result) */
+const char *savestates_dump_main(void);
 void savestates_status_text(char *buf, int len);
 
 #endif
