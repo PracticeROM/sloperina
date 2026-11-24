@@ -15,8 +15,17 @@
  *   open [<menu path>]         the menu on screen at that menu (or at that item of its menu), for a look at it
  *   wait <frames>              the next line runs that many frames later (ended, with an error, if the game is
  *                              held meanwhile: no frames pass then)
+ *   wait until <condition> [max <frames>]
+ *                              the next line runs once the condition holds (control, still, moved, map, dialog,
+ *                              nodialog, choice, event, noevent, paused, unpaused, wheel, zr, actor, value: see
+ *                              the manual); an error after max frames (1800); held frames don't count, and if
+ *                              the script's own pause holds the game it ends with an error
  *   repeat <n> ... end         the lines between, that many times (up to four inside one another); with wait
  *                              and input, a sequence of any length
+ *   repeat until <condition> [max <rounds>] ... end
+ *                              the lines between until the condition holds at the end (100 rounds unless said)
+ *   onerr stop | go            stop: the script ends at the first line that fails; go (each script's start):
+ *                              it carries on
  *   pause                      hold the game, as frame advance does (it needn't be on)
  *   step [frames]              let that many frames through (pausing first), then hold again
  *   run                        let the game run again
@@ -24,7 +33,8 @@
  *                              buttons and sticks for the game, on top of the controller: "A+ZL", "0x41" or
  *                              "-" for none; sticks -32767..32767; for 1 frame unless said (for 0: until the
  *                              next input line). "input off" ends it.
- *   status                     the frame, the map, where Link is and which way he faces, how he moves (vy, hs:
+ *   status                     the menu screen, the item wheel, the message window and its message, the running
+ *                              event, the frame, the map, where Link is and which way he faces, how he moves (vy, hs:
  *                              his speed up and across), what he holds and has on ZR, whether ZL has a target
  *                              (lock: 2 yes, 3 no), whether he's on the ground, his main and weapon action ids,
  *                              whether the game is held; vy to wpn come from the build's offsets (z64hd.h), "-"
@@ -33,8 +43,16 @@
  *   trace <frames> | off       a line for each of the next frames: "<line> t y= vy= hs= x= z= hand= zr= paused=
  *                              lock= ground= act= wpn="
  *   place <x> <y> <z> [facing] Link to that spot of this map, facing that way (degrees, 0 = +z), as load position
- *                              moves him; wait some frames for it to settle
- *   actors [metres]            the running actors within that distance of Link (6 unless said), nearest first
+ *                              moves him; goes on once he's there (an error after 120 frames)
+ *   place near <actor> [metres] Link that far (1.2 m) from the nearest actor of that name, facing it
+ *   actors [metres]            the running actors within that distance of Link (6 unless said), nearest first,
+ *                              with where each is
+ *   talk [max <frames>]        A through the message windows until the talk is over or a choice comes up
+ *   choose <n>                 at a choice, the cursor to option n (0 the first), and take it
+ *   flag <field> [value]       a saved Bool or Int field (by name or 0x hash): read it, or set it
+ *   str <field> [value]        the same for a String field ("-" empties it)
+ *   event <name> [here | actor <name> | at <x> <y> <z> [facing]]
+ *                              start a game event by name (warp.c's request), with that starter
  *   title                      back to the game's title screen, the way Game Over's Quit leaves play (FINDINGS
  *                              9.26): ok once the game runs the 30-frame event it leaves by, after which it fades
  *                              to the title; err if it can't now (paused, a cutscene, a map loading...). What

@@ -3,6 +3,7 @@
 #define WARP_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "data.h"
 
@@ -25,6 +26,10 @@ bool warp_requested(void);
 /* Request the event `name` with no parameters, as the SeqOneShotRequestEvent node does (title.c); false if the
  * game refused it (another event runs or is being started) */
 bool warp_request_event(const char *name);
+/* The same with a starter (remote.c's event line): the event puts its StarterPos actors at `transform` (row-major
+ * 3x4, the place in the last column) and takes `actor` (0: none) as the starter; false also where this build's
+ * starter fields aren't known */
+bool warp_request_event_from(const char *name, const float transform[12], uintptr_t actor);
 /* an event runs (an arrival, a cutscene, a talk): the game refuses a warp's event request until it's over */
 bool warp_event_running(void);
 

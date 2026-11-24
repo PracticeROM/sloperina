@@ -375,6 +375,21 @@ bool gd_game_pausing(void)
 #define GD_MENU_SCREEN 0x578D41E1u      /* unnamed Enum: None, ItemMenu, ..., WorldMap, ..., GameOver */
 #define GD_MENU_SCREEN_NONE 0xB6EEDE09u /* murmur3("None") */
 
+const char *gd_menu_screen_name(void)
+{
+  static const char *const names[] = { "None", "ItemMenu", "EquipmentMenu", "CollectMenu", "SystemMenu", "Save",
+                                       "Load", "Option", "ActionGuide", "ToTitle", "WorldMap", "DungeonMap",
+                                       "FieldMap", "UnopenMap", "ChallengeMenu", "ChallengeMenuFullScreen",
+                                       "ImportantMenu", "Ocarina", "Title", "Loading", "GameOver" };
+  uint32_t screen;
+  if (!gd_get_enum(GD_MENU_SCREEN, &screen))
+    return 0;
+  for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+    if (murmur3(names[i]) == screen)
+      return names[i];
+  return "?";
+}
+
 bool gd_game_menu_screen(void)
 {
   uint32_t screen;

@@ -846,16 +846,25 @@ order on the game's thread. What each line did is added to `sloperinaGZ/remote/o
 | `open [<menu path>]` | Opens the menu on the screen at that menu, or at that item of its menu with the cursor on it (without a path, the top menu): for a look at it, or a screenshot. |
 | `wait <frames>` | The next line runs that many frames later. |
 | `repeat <n>` ... `end` | Runs the lines between that many times (up to four inside one another): with `wait` and `input`, a sequence of any length. |
+| `wait until <condition> [max <frames>]` | The next line runs once the condition holds (see below); an error after `max` frames (1,800 unless said), Held frames don't count: held by frame advance's buttons it waits on, and goes on when the game runs; held by the script's own `pause` or `step` (nothing else would let it go) it ends with an error (`talk`, `choose` and `place` too). |
+| `repeat until <condition> [max <rounds>]` ... `end` | Runs the lines between until the condition holds at the `end` (so at least once); an error after `max` rounds (100 unless said). |
+| `onerr stop` / `onerr go` | `stop`: the script ends at the first line that fails (with what that line was waiting for), and `out.txt` says `end (onerr stop)`. `go` (each script's start): it carries on. |
 | `pause` | Holds the game as frame advance does (frame advance needn't be on). |
 | `step [frames]` | Lets that many frames through (one unless said), then holds the game again. Pauses first if the game was running. |
 | `run` | Lets the game run again. |
 | `input <buttons> [ls <x> <y>] [rs <x> <y>] [for <frames>]` | Buttons and sticks for the game, on top of the controller's: names with `+` between (`A+ZL`, at most four), a number (`0x41`) or `-` for none; a stick is -32767 to 32767 each way. For one frame unless said; `for 0` lasts until the next `input`; `input off` ends it. The menu's shortcuts don't see these buttons: use `fire` for those. |
-| `status` | The game's frame counter, the map, where Link is and which way he faces (`facing`, degrees), how he moves (`vy`, `hs`: his speed up and across), what he holds and has on ZR (`hand`, `zr`), whether ZL has a target (`lock`: 2 yes, 3 no), whether he's on the ground, his main and weapon action ids (`act`, `wpn`), whether the menu and the game's pause screen are open, whether the game is held, and the warp's state. `vy` and `hs` are the velocity as the game last set it, so they can keep a value while Link stands still (after a landing, for one). |
+| `status` | The menu screen that's up (`screen`: `None` in play, `Loading`, `ItemMenu`, `GameOver`...), the item wheel (`wheel`: `closed`, `opening`, `open`), the message window (`dialog`: `closed`, `typing`, `waiting` for A, `turning` the page, `choices` appearing, `choice:<n>` with the cursor on option n) and its message (`msg`, e.g. `Npc_Hylia_Soldier_008_Child:Talk_03`), the event that's running (`event`, its current flow), the game's frame counter, the map, where Link is and which way he faces (`facing`, degrees), how he moves (`vy`, `hs`: his speed up and across), what he holds and has on ZR (`hand`, `zr`), whether ZL has a target (`lock`: 2 yes, 3 no), whether he's on the ground, his main and weapon action ids (`act`, `wpn`), whether the menu and the game's pause screen are open, whether the game is held, and the warp's state. `vy` and `hs` are the velocity as the game last set it, so they can keep a value while Link stands still (after a landing, for one). |
 | `trace <frames>` / `trace off` | A line for each of the next frames, without holding the script up: `<line> t y= vy= hs= x= z= hand= zr= paused= lock= ground= act= wpn=`. |
-| `actors [metres]` | The running actors within that distance of Link (6 unless said), nearest first, by the game's names. |
+| `actors [metres]` | The running actors within that distance of Link (6 unless said), nearest first, by the game's names, with where each is (`x y z`). |
 | `spawn <actor> [metres]` | The game makes that actor that far in front of Link (2 m unless said), facing him, as **debug > actors > quick spawn** does; the line ends once it's running in the scene (`ok spawn <actor>: made after <n> frames`), or with `err` if the game refused it or it didn't appear within 600 frames. Only the names the game has (those in quick spawn's **all** lists, and the animals), in any case (`Enemy_Wolfos`). |
-| `place <x> <y> <z> [facing]` | Puts Link on that spot of this map as **load position** does (wait some frames for it). With a facing (degrees, 0 = +z) he is turned to it; without, he faces as he did. |
+| `place <x> <y> <z> [facing]` | Puts Link on that spot of this map as **load position** does, and goes on once he's there and load position has let go of him (it loads the position again while it only found him; an error after 120 frames). With a facing (degrees, 0 = +z) he is turned to it; without, he faces as he did. |
+| `place near <actor> [metres]` | Puts Link that far (1.2 m unless said) from the nearest actor of that name, on the side he's on, facing it. |
 | `title` | Goes back to the game's title screen from whatever the game is doing (as **debug > return to title screen**), also with the game held (it's let go). `ok` once Link is gone and the game is at (or fading to) its title screen; `err` with the reason if it couldn't start (already at the title screen) or the game didn't leave play within a minute. Whatever isn't saved is lost, as with the pause screen's Return to Title. |
+| `talk [max <frames>]` | Presses A through the message windows while the text types or waits, until the talk is over (no event and no window for 10 frames) or a choice comes up (a choice that's up when it starts doesn't count). |
+| `choose <n>` | At a choice, moves the cursor to option n (0 = the first) and takes it. |
+| `flag <field> [value]` | Reads a saved Bool or Int field (by its name, e.g. `Market_Item_Bottle_TutorialEvent_Started`, or a `0x` hash), or sets it. |
+| `str <field> [value]` | The same for a String field; `-` sets it empty. |
+| `event <name> [here \| actor <name> \| at <x> <y> <z> [facing]]` | Starts a game event by its name (a row of the game's `RSDB/EventSetting` table, e.g. `Item_Bottle_TutorialEvent_Animal_Insect_GetEvent`), as the game's own event request does. The starter, whose place an event like that one puts its actors at, is Link (`here`), the nearest actor of that name, or a spot; without one it's the world's origin. |
 | `echo <text>` | Puts the text in `out.txt` (a marker). |
 | `peek <hex address> [bytes]` | Memory at that address (rounded down to 8), as 8-byte words, 64 bytes or up to 256: for finding where the game keeps something. |
 | `actor <name>` | Each actor of that name: its address, its layout instance id and how many paths it walks (the **path** option). |
@@ -864,6 +873,15 @@ order on the game's thread. What each line did is added to `sloperinaGZ/remote/o
 | `doortimer <name>` | Puts the door close watch on the first door of that name (as **close timer watch** does, without adding the watch to the list) and says what it reads now: the frames left, or **closed**. |
 | `findref <hex>` | For finding what the game keeps: where Link's components (two pointers deep) hold that value, or for an actor's address also its components, attention sender and id. |
 | `id <word>` | The word that starts this script's lines in `out.txt` (otherwise `-`), to tell them from another's. |
+
+**Conditions** for `wait until` and `repeat until`: `control` (the game in play, no event, no message window, not
+paused), `still` (control, and Link at rest for 8 frames: after a warp he slides in, and the item wheel won't open
+until he has stopped), `moved [metres]` (control, and Link more than that far, 1 m unless said, from where the wait
+began: a warp or a teleport has landed), `map <name>` (that map, loaded and in play), `dialog`, `nodialog`, `choice`,
+`event`, `noevent`, `paused`, `unpaused`, `wheel` (the item wheel open and taking the stick), `zr <item number>`
+(`status` shows the number), `actor <name> [within <metres>]` (10 m unless said) and `value <menu path> = <value>`
+(the item's value as `get` shows it: the whole of it, its number, or the name in its brackets, `bug` for
+`10 (bug)`).
 
 A **menu path** is the names from the top menu down with `/` between them (or, starting `~/`, from the menu on the screen: a guard's menu opened from the actor browser, `~/vision`), in any case: `cheats/infinite magic`,
 `scene/end cutscene`, `settings/frame advance/enabled`. `name#2` is the second item of that name in its menu and `@7`
