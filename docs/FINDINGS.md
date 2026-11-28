@@ -2729,3 +2729,50 @@ Player packs) runs `ExecutePlayerReactionPreAbyss` and the event `DmF_SY_FallDow
 - So (drownview.c): the actor browser's **drown timer watches** read these counters (the one changing is the step it's
   at; what's left divided by how much it changes a frame): **drown timer** until the fade starts, **fade timer**,
   **respawn in** until it's put back. **respawn point** draws WarpPos, home or the last landing.
+
+
+### 9.48 The message window and the item wheel (1.1.1, read live in Lichii 23rd November 2026; 1.0.0 the same, from its code)
+- Both are screens of the UI manager (§4, `[[main+ui_mgr_ptr]]`: count at `+0x8`, the screens' array at `+0x10`),
+  kept all the time whether shown or not. A screen's layout name is the `char *` at screen`+0x178`: the message
+  window is `MessageDialog_00`, the item wheel `ShortCut_00`.
+- **The message window's state** is the u32 at `+0x2F8`: 2 the text typing, 3 all shown and waiting for A, 6 turning
+  to the next page after A, 5 the choices appearing, 4 a choice up, 12 closed. Measured by comparing the screen
+  through a soldier's talk with a choice (Castle Town) and the potion shop's. At 4 the u8 at `+0x1AC` is the
+  cursor (0 = the first option). The message's id is the `char *` at `+0x4B8`:
+  `EventFlowMsg/<flowchart>:<label>` (`EventFlowMsg/Npc_Hylia_Soldier_008_Child:Talk_03`).
+- **The item wheel's phase** is the high u16 of the u32 at `+0x1A4`: 0 closed, 1 opening, 2 open. The wheel takes
+  the stick only at 2: a stick pushed during 1 picks nothing. It doesn't open while Link is still moving (after a
+  warp he slides in for a few frames).
+- `navstate.c` reads both (`status`'s `dialog`, `msg` and `wheel`; `wait until dialog`/`choice`/`wheel`; `talk`,
+  `choose`). The menu screen that's up is the Enum `0x578D41E1` of §9.1 (`status`'s `screen`).
+- **1.0.0** (not run: from its code, through the two builds' function pairs, all with the same code in both): a UI
+  screen's constructor (1.1.1 `main+0x67EB40` [`0x68D580`]) writes `+0x178`, `+0x1A4` and the cursor's `+0x1AC`
+  (in the u64 at `+0x1A8`); the message window's (`main+0xA66FD0` [`0xAF96E0`]) sets the state to 12 and
+  `+0x4B8`; its destructor (`main+0x33E71B0` [`0x3386C60`]) frees 0x6B0 bytes in both. The state is read at `+0x2F8`
+  in `main+0x33E88B0` [`0x3388360`]. So the window's layout is the same in both builds.
+- The ZR item (`status`'s `zr`) is the item button's own value, not a GameData field: a bottle's content (bug,
+  fish...) shows in the bottle's GameData field, which is what `wait until value` reads.
+
+### 9.49 Starting an event by name, and its starter (1.1.1; 1.0.0 addresses in brackets, its offsets the same; checked in game on 1.1.1)
+- Found by NovaOOT/OOT-PC (MIT; `runtime/debug_warp.c`), which starts events the way `SeqOneShotRequestEvent`
+  does: a request of 0x1B20 bytes made by `main+0xD79F10` [`0xD3C9A0`], the event's name written into the text
+  whose `char *` is at request`+0x1A90` (its capacity, s32, at `+0x1A98`), then `main+0xD7A820` [`0xD3D2B0`]
+  (event manager `[[main+event_mgr_ptr]]`, the request): bit 0 of the result is accepted.
+- **The name** is a row of `RSDB/EventSetting.Product.111.rstbl.byml`: the flowchart, its entry point and how the
+  event's actors are placed (`StarterPos`: at the starter). Example: `Item_Bottle_TutorialEvent_Animal_Insect_GetEvent`,
+  the potion shop's bottle task end (flowchart `Npc_Hylia_020_Shop_Child`, run by the bottle's `Dm_SY_InsertBottle`
+  once `Market_Item_Bottle_TutorialEvent_Started` is set): the shopkeeper comes to Link, wherever he is.
+- **The starter** is in the request at `+0x1918`: a row-major 3×4 transform (rotation rows with the position in
+  each row's fourth float), then at `+0x1918+0x38` the starter's actor handle (`+0x08` the handle's entry, `+0x10`
+  its id; -1 for none). The event's actors are made when the manager takes the request, so it must be filled
+  before the call: written into the running event afterwards it does nothing. With no starter the event uses the
+  world's origin (the shopkeeper there, and Link voided out).
+- **An actor's handle entry** is the pointer at actor`+0x1B0`; the entry holds the actor at `+0x40` and its id
+  (u32) at `+0x48`. The same on 1.0.0: the code that lets an actor's entry go (1.1.1 `main+0x1A5AE0` [`0x164860`], the same
+  in both builds) clears `+0x40`, sets the id to -1 and clears actor`+0x1B0`; the request's constructor, which
+  puts the identity transform at `+0x1918`, is the same in both builds too.
+- Checked: `event Item_Bottle_TutorialEvent_Animal_Insect_GetEvent here` in Castle Town puts the shopkeeper in
+  front of Link and Link 2 m from where he stood along his facing, turned round (the event's own placement);
+  `actor Npc_Hylia_Zelda_Child` does the same in front of Zelda. The boot event fields
+  (`Sequence_ReservedBootEventName`, `EventStarterName`) start an event only through a map load with a real
+  `StartPos` starter, so they can't do this.

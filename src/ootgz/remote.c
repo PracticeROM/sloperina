@@ -9,6 +9,7 @@
 #include "binds.h"
 #include "drownview.h"
 #include "enemyhp.h"
+#include "eventskip.h"
 #include "gamedata.h"
 #include "input.h"
 #include "pausemgr.h"
@@ -19,6 +20,7 @@
 #include "frametrace.h"
 #include "nvn.h"
 #include "physdump.h"
+#include "navstate.h"
 #include "position.h"
 #include "pouch.h"
 #include "sdfs.h"
@@ -51,6 +53,8 @@ static char script[SCRIPT_MAX];
 static size_t script_len, cursor;
 static int line_no;
 static bool running;
+static bool stop_on_error; /* onerr stop: the script ends at the first line that fails */
+static bool stop_now;      /* ... and one has */
 static char script_id[24] = "-";
 
 /* the repeats the script is inside: where each one's lines start, and the rounds it still has */
@@ -66,6 +70,7 @@ static bool pause_wanted;           /* pause: for frame advance to take */
 static bool pause_waiting;          /* ... and until it holds the game */
 static int steps_left;              /* step: frames still to let through */
 static bool stepping;               /* ... and until the game is held again after them */
+static bool script_held;            /* the game is held by this script's pause or step (not by a hand) */
 static bool run_wanted, run_waiting; /* run: the same two */
 static bool title_waiting;          /* title: until the game has started the event or it failed */
 
@@ -209,7 +214,7 @@ static void out_flush(void)
 /* one line of out.txt: "<frame> <id> <text>" */
 static void out_line(const char *text)
 {
-  char line[320];
+  char line[480];
   int n = snprintf(line, sizeof(line), "%u %s %s\n", (unsigned)frame_counter(), script_id, text);
   if (n < 0)
     return;
@@ -227,7 +232,7 @@ static void out_line(const char *text)
 static void result(bool ok, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static void result(bool ok, const char *fmt, ...)
 {
-  char text[256];
+  char text[512]; /* status's line: about 330 characters, more with a long message id and event */
   int n = snprintf(text, sizeof(text), "%d %s ", line_no, ok ? "ok" : "err");
   va_list ap;
   va_start(ap, fmt);
@@ -236,6 +241,8 @@ static void result(bool ok, const char *fmt, ...)
   trim_end(text);
   out_line(text);
   log_printf("remote: %s %s", script_id, text);
+  if (!ok && stop_on_error && running)
+    stop_now = true;
 }
 
 /* --- menu items by name ---------------------------------------------------------------------- */
@@ -680,6 +687,54 @@ static bool parse_decimal(const char *s, double *out)
   return true;
 }
 
+#define PLACE_NEAR_ENOUGH 0.3f /* place: metres (across) from the spot that count as there */
+#define PLACE_RETRY 20         /* ... frames between loads of the position while he isn't */
+#define PLACE_MAX 120          /* ... frames before it gives up */
+
+/* place: the line waits until Link is at the spot (load position's first use after a map load may only find his
+ * record; the position is loaded again until he's there) */
+static struct {
+  bool active;
+  double x, y, z, facing;
+  int frames;
+  char said[200];
+} placing;
+
+static void place_at(double x, double y, double z, double facing, const char *said)
+{
+  position_set(x, y, z, facing);
+  position_load();
+  placing.active = true;
+  placing.x = x, placing.y = y, placing.z = z, placing.facing = facing;
+  placing.frames = 0;
+  snprintf(placing.said, sizeof(placing.said), "%s", said);
+}
+
+/* once a game frame while a place waits */
+static void place_frame(void)
+{
+  vec3f_t now = { 0 };
+  placing.frames++;
+  if (link_drawn_pos(&now)) {
+    float dx = now.x - (float)placing.x, dz = now.z - (float)placing.z;
+    if (dx * dx + dz * dz <= PLACE_NEAR_ENOUGH * PLACE_NEAR_ENOUGH && !position_busy()) {
+      placing.active = false;
+      result(true, "%s after %d frames", placing.said, placing.frames);
+      return;
+    }
+  }
+  if (placing.frames >= PLACE_MAX) {
+    placing.active = false;
+    result(false, "place: Link not there after %d frames (at %.2f %.2f %.2f)", placing.frames, (double)now.x,
+           (double)now.y, (double)now.z);
+    return;
+  }
+  if (placing.frames % PLACE_RETRY == 0 && link_record_status() == REC_READY) {
+    position_set(placing.x, placing.y, placing.z, placing.facing);
+    position_load();
+  }
+}
+
 /* "place <x> <y> <z> [facing]": Link to that spot of this map, as load position does it */
 static void run_place(char *args)
 {
@@ -703,9 +758,73 @@ static void run_place(char *args)
     link_state(&s);
     v[3] = s.facing;
   }
-  position_set(v[0], v[1], v[2], v[3]);
-  position_load();
-  result(true, "place %.3f %.3f %.3f facing %.1f", v[0], v[1], v[2], v[3]);
+  char said[200];
+  snprintf(said, sizeof(said), "place %.3f %.3f %.3f facing %.1f", v[0], v[1], v[2], v[3]);
+  place_at(v[0], v[1], v[2], v[3], said);
+}
+
+#define NEAR_SEARCH 64      /* place near / wait until actor: how many of the nearest actors are looked through */
+#define NEAR_RADIUS 60.0f   /* ... within this many metres */
+#define NEAR_DEFAULT 1.2    /* place near: metres from the actor unless said */
+
+static bool same_name(const char *a, const char *b)
+{
+  if (!a || !b)
+    return false;
+  while (*a && *a == *b)
+    a++, b++;
+  return *a == *b;
+}
+
+/* the nearest running actor called name within radius metres, into *out; false if none */
+static bool nearest_named(const char *name, float radius, actor_near_t *out)
+{
+  static actor_near_t found[NEAR_SEARCH];
+  int n = actors_near(radius, found, NEAR_SEARCH);
+  for (int i = 0; i < n; i++)
+    if (same_name(found[i].name, name)) {
+      *out = found[i];
+      return true;
+    }
+  return false;
+}
+
+/* "place near <actor> [metres]": Link that far from the nearest actor of that name, on the side he's on now, facing it */
+static void run_place_near(char *args)
+{
+  char *name = take_word(&args);
+  char *metres = take_word(&args);
+  double d = NEAR_DEFAULT;
+  if (!*name || (*metres && (!parse_decimal(metres, &d) || d < 0))) {
+    result(false, "place near: an actor's name (as actors lists it), then metres from it (%.1f unless said)", NEAR_DEFAULT);
+    return;
+  }
+  actor_near_t a;
+  vec3f_t me;
+  if (link_record_status() != REC_READY || !link_drawn_pos(&me)) {
+    result(false, "place near: Link not found");
+    return;
+  }
+  if (!nearest_named(name, NEAR_RADIUS, &a)) {
+    result(false, "place near: no %s within %.0f m", name, (double)NEAR_RADIUS);
+    return;
+  }
+  double dx = me.x - a.pos[0], dz = me.z - a.pos[2];
+  double len = hypotf((float)dx, (float)dz);
+  if (len < 0.01) { /* on top of it: step back the way he faces */
+    double fx, fz;
+    if (!link_facing(&fx, &fz))
+      fx = 0, fz = 1;
+    dx = -fx, dz = -fz, len = 1;
+  }
+  double x = a.pos[0] + dx / len * d, z = a.pos[2] + dz / len * d, y = a.pos[1];
+  double facing = atan2f((float)(a.pos[0] - x), (float)(a.pos[2] - z)) * (180.0 / 3.14159265);
+  if (facing < 0)
+    facing += 360;
+  char said[200];
+  snprintf(said, sizeof(said), "place near %s (%.2f %.2f %.2f): %.3f %.3f %.3f facing %.1f", name, (double)a.pos[0],
+           (double)a.pos[1], (double)a.pos[2], x, y, z, facing);
+  place_at(x, y, z, facing, said);
 }
 
 #define ACTORS_MAX 24
@@ -1001,10 +1120,194 @@ static void run_actors(const char *args)
   int n = actors_near((float)radius, near, ACTORS_MAX);
   char text[160];
   for (int i = 0; i < n; i++) {
-    snprintf(text, sizeof(text), "%d | %.2f %.80s", line_no, (double)near[i].distance, near[i].name);
+    snprintf(text, sizeof(text), "%d | %.2f %.80s %.2f %.2f %.2f", line_no, (double)near[i].distance, near[i].name,
+             (double)near[i].pos[0], (double)near[i].pos[1], (double)near[i].pos[2]);
     out_line(text);
   }
   result(true, "%d actors within %d m", n, (int)radius);
+}
+
+/* flag <name or 0xhash> [value]: read a saved Bool (else Int) field, or set it */
+static void run_flag(char *args)
+{
+  char *name = take_word(&args);
+  args = skip_spaces(args);
+  if (!name || !*name) {
+    result(false, "flag: a field name or 0x hash, then optionally a value");
+    return;
+  }
+  if (!gd_ready()) {
+    result(false, "flag: the game's fields aren't ready");
+    return;
+  }
+  uint32_t hash = 0;
+  if (name[0] == '0' && (name[1] == 'x' || name[1] == 'X')) {
+    for (const char *p = name + 2; *p; p++) {
+      int d = *p >= '0' && *p <= '9' ? *p - '0' : *p >= 'a' && *p <= 'f' ? *p - 'a' + 10
+            : *p >= 'A' && *p <= 'F' ? *p - 'A' + 10 : -1;
+      if (d < 0) {
+        result(false, "flag: %s is not a hash", name);
+        return;
+      }
+      hash = hash * 16 + (uint32_t)d;
+    }
+  } else {
+    hash = murmur3(name);
+  }
+  bool b;
+  int32_t i;
+  bool is_bool = gd_get_bool(hash, &b);
+  bool is_int = !is_bool && gd_get_int(hash, &i);
+  if (!is_bool && !is_int) {
+    result(false, "flag: no Bool or Int field %s (0x%08x)", name, (unsigned)hash);
+    return;
+  }
+  if (*args) {
+    int32_t value;
+    if (!parse_int(args, &value)) {
+      result(false, "flag: the value is a number");
+      return;
+    }
+    if (is_bool) {
+      gd_set_bool(hash, value != 0);
+      gd_get_bool(hash, &b);
+    } else {
+      gd_poke_int(hash, value);
+      gd_get_int(hash, &i);
+    }
+  }
+  if (is_bool)
+    result(true, "%s 0x%08x bool %d", name, (unsigned)hash, (int)b);
+  else
+    result(true, "%s 0x%08x int %d", name, (unsigned)hash, (int)i);
+}
+
+/* event <name>: start a game event by its name (RSDB EventSetting's row: "Item_Bottle_TutorialEvent_Animal_Insect_GetEvent")
+ * the way SeqOneShotRequestEvent does (warp.c); the result is the manager's answer */
+/* event ... here | actor <name> | at: the starter, for the result line */
+static struct {
+  uintptr_t actor;
+  char what[64];
+} starter;
+
+float cosf(float x); /* from sdk */
+float sinf(float x); /* from sdk */
+
+static void run_event(char *args)
+{
+  char *name = take_word(&args);
+  if (!*name) {
+    result(false, "event: an event's name");
+    return;
+  }
+  /* "here" (Link), "actor <name>" (the nearest of that name) or "at <x> <y> <z> [facing]": the starter, whose
+   * place (and facing) the event puts its StarterPos actors at */
+  char *where = take_word(&args);
+  bool with_starter = *where != 0;
+  double sp[4] = { 0, 0, 0, 0 };
+  starter.actor = 0;
+  if (same(where, "here")) {
+    vec3f_t me;
+    link_state_t st;
+    starter.actor = link_actor();
+    if (!link_drawn_pos(&me)) {
+      result(false, "event: Link not found");
+      return;
+    }
+    link_state(&st);
+    sp[0] = me.x, sp[1] = me.y, sp[2] = me.z, sp[3] = st.facing;
+    snprintf(starter.what, sizeof(starter.what), "Link");
+  } else if (same(where, "actor")) {
+    actor_near_t a;
+    char *who = take_word(&args);
+    if (!*who) {
+      result(false, "event: actor <name>");
+      return;
+    }
+    if (!nearest_named(who, NEAR_RADIUS, &a)) {
+      result(false, "event: no %s within %.0f m", who, (double)NEAR_RADIUS);
+      return;
+    }
+    starter.actor = a.actor;
+    sp[0] = a.pos[0], sp[1] = a.pos[1], sp[2] = a.pos[2];
+    snprintf(starter.what, sizeof(starter.what), "%s", who);
+  } else if (same(where, "at")) {
+    int n = 0;
+    for (char *w = take_word(&args); *w && n < 5; w = take_word(&args), n++)
+      if (n >= 4 || !parse_decimal(w, &sp[n]))
+        n = 9;
+    if (n < 3 || n > 4) {
+      result(false, "event: at <x> <y> <z> [facing]");
+      return;
+    }
+    snprintf(starter.what, sizeof(starter.what), "at %.2f %.2f %.2f", sp[0], sp[1], sp[2]);
+  } else if (with_starter) {
+    result(false, "event: <name> [here | actor <name> | at <x> <y> <z> [facing]]");
+    return;
+  }
+  if (with_starter && (!z64hd_game || !z64hd_game->event_req_starter_mtx || !z64hd_game->actor_handle_entry)) {
+    result(false, "event: a starter isn't known for this game version");
+    return;
+  }
+  if (!z64hd_game || !z64hd_game->event_req_ctor || !z64hd_game->event_req_submit || !z64hd_game->event_mgr_ptr) {
+    result(false, "event: not known for this game version");
+    return;
+  }
+  uintptr_t holder = sys_ptr(MAIN(z64hd_game->event_mgr_ptr));
+  if (!holder || !sys_ptr(holder)) {
+    result(false, "event: no event manager");
+    return;
+  }
+  bool ok;
+  if (with_starter) {
+    float c = cosf((float)(sp[3] * 3.14159265 / 180)), sn = sinf((float)(sp[3] * 3.14159265 / 180));
+    float m[12] = { c, 0, sn, (float)sp[0], 0, 1, 0, (float)sp[1], -sn, 0, c, (float)sp[2] };
+    ok = warp_request_event_from(name, m, starter.actor);
+  } else {
+    ok = warp_request_event(name);
+  }
+  if (with_starter)
+    result(ok, "event %s, starter %s (%.2f %.2f %.2f facing %.1f): %s", name, starter.what, sp[0], sp[1], sp[2],
+           sp[3], ok ? "accepted" : "refused");
+  else
+    result(ok, "event %s: %s", name, ok ? "accepted" : "refused");
+}
+
+/* str <name or 0xhash> [value]: read a String field, or set it ("-" for empty) */
+static void run_str(char *args)
+{
+  char *name = take_word(&args);
+  char *value = skip_spaces(args);
+  trim_end(value);
+  if (!*name) {
+    result(false, "str: a field name or 0x hash, then optionally a value (- for empty)");
+    return;
+  }
+  if (!gd_ready()) {
+    result(false, "str: the game's fields aren't ready");
+    return;
+  }
+  uint32_t hash = 0;
+  if (name[0] == '0' && (name[1] == 'x' || name[1] == 'X')) {
+    int32_t h;
+    if (!parse_int(name, &h)) {
+      result(false, "str: %s is not a hash", name);
+      return;
+    }
+    hash = (uint32_t)h;
+  } else {
+    hash = murmur3(name);
+  }
+  if (*value && !gd_set_str(hash, same(value, "-") ? "" : value)) {
+    result(false, "str: can't set %s (0x%08x)", name, (unsigned)hash);
+    return;
+  }
+  const char *now = gd_get_str(hash);
+  if (!now) {
+    result(false, "str: no String field %s (0x%08x)", name, (unsigned)hash);
+    return;
+  }
+  result(true, "%s 0x%08x = \"%s\"", name, (unsigned)hash, now);
 }
 
 static void run_status(bool held)
@@ -1017,12 +1320,380 @@ static void run_status(bool held)
   const char *warp = warp_state();
   char motion[48];
   motion_text(&s, motion, sizeof(motion));
-  result(true, "frame=%u map=%s link=%s x=%.3f y=%.3f z=%.3f facing=%.1f %s hand=%d zr=%d lock=%d ground=%d act=%d "
+  dialog_t d;
+  dialog_read(&d);
+  char dialog[24], event[EVENTSKIP_NAME_MAX];
+  if (d.state == DLG_CHOICE)
+    snprintf(dialog, sizeof(dialog), "choice:%d", d.cursor);
+  else if (d.state == DLG_OTHER)
+    snprintf(dialog, sizeof(dialog), "other:%d", d.raw);
+  else
+    snprintf(dialog, sizeof(dialog), "%s", dialog_state_name(d.state));
+  if (!eventskip_flow_name(event))
+    snprintf(event, sizeof(event), "%s", eventskip_running() ? "?" : "-");
+  const char *screen = gd_ready() ? gd_menu_screen_name() : 0;
+  static const char *const wheel_names[] = { "closed", "opening", "open" };
+  int wheel = wheel_phase();
+  result(true, "screen=%s wheel=%s dialog=%s msg=%s event=%s frame=%u map=%s link=%s x=%.3f y=%.3f z=%.3f facing=%.1f %s hand=%d zr=%d lock=%d ground=%d act=%d "
                "wpn=%d held=%d menu=%d game_paused=%d warp=%s",
-         (unsigned)frame_counter(), map && map[0] ? map : "?", has_pos ? "yes" : "no", (double)pos.x, (double)pos.y,
+         screen ? screen : "-", wheel >= 0 && wheel <= 2 ? wheel_names[wheel] : "-", dialog, d.msg[0] ? d.msg : "-", event, (unsigned)frame_counter(), map && map[0] ? map : "?",
+         has_pos ? "yes" : "no", (double)pos.x, (double)pos.y,
          (double)pos.z, (double)s.facing, motion, (int)s.hand, (int)s.zr, (int)s.lock, (int)s.ground,
          (int)s.action, (int)s.weapon, (int)held, menu_current != 0, (int)(gd_ready() && gd_game_paused(0, 0)),
          warp && warp[0] ? warp : "-");
+}
+
+/* --- waiting for the game: wait until, talk ------------------------------------------------------ */
+
+#define UNTIL_DEFAULT 1800  /* frames before wait until / talk give up, unless said */
+#define TALK_PRESS 2        /* talk: frames A is held */
+#define TALK_GAP 6          /* ... and frames between presses */
+#define TALK_QUIET 10       /* ... frames with no event and no window before it counts as over */
+
+#define STILL_FRAMES 8 /* still: frames in a row at rest (after a warp Link slides in and the game ignores the item
+                       * wheel until he has stopped) */
+typedef enum { U_NONE, U_CONTROL, U_DIALOG, U_NODIALOG, U_CHOICE, U_EVENT, U_NOEVENT, U_PAUSED, U_UNPAUSED, U_MAP,
+               U_ACTOR, U_MOVED, U_ZR, U_STILL, U_VALUE, U_WHEEL } until_t;
+/* s starts with the word w (then a space or the end) */
+static bool starts_word(const char *s, const char *w)
+{
+  while (*w && *s == *w)
+    s++, w++;
+  return !*w && (*s == ' ' || *s == '\t' || !*s);
+}
+
+/* a condition for wait until and repeat until */
+typedef struct {
+  until_t kind;
+  char arg[96];     /* map, actor: the name; value: the menu path */
+  char want[48];    /* value: the value wanted */
+  float metres;
+  vec3f_t from;     /* moved: where Link was when the wait began */
+  int still_for;    /* still: frames in a row with control and Link at rest */
+  int32_t zr;       /* zr: the item wanted on ZR */
+} cond_t;
+static struct {
+  cond_t c;
+  int left, waited;
+} until;
+/* repeat until: each level's condition (checked at its end) and rounds so far */
+static struct {
+  bool on;
+  cond_t c;
+  int rounds;
+} repeat_until[REPEAT_DEPTH];
+#define REPEAT_UNTIL_DEFAULT 100 /* rounds before repeat until gives up, unless said */
+
+static struct {
+  bool active;
+  bool past_choice; /* a choice that was up when talk started is still up: not the one it stops at */
+  int choose;       /* choose: the option wanted (-1: plain talk) */
+  int left, frames, gap, quiet, messages;
+  uint32_t a_mask, up_mask, down_mask;
+  char msg[96];
+} talk;
+
+static uint32_t button_mask(const char *name)
+{
+  uint32_t bind;
+  return bind_parse(name, &bind) ? bind_mask(bind) & 0xFFFF : 0;
+}
+
+static void press(uint32_t mask)
+{
+  input_remote_buttons = mask;
+  input_remote_sticks[0] = input_remote_sticks[1] = false;
+  input_remote_active = true;
+  input_frames = TALK_PRESS;
+  talk.gap = TALK_PRESS + TALK_GAP;
+}
+
+static bool same_name(const char *a, const char *b);
+
+/* the game is in a map and playing: no load or menu screen up (the menu screen field reads Loading during a map
+ * load, ItemMenu, GameOver... otherwise), and Link's main action isn't 0 (what it reads during loads and events) */
+static bool in_play(void)
+{
+  const char *screen = gd_ready() ? gd_menu_screen_name() : 0;
+  if (screen && !same_name(screen, "None"))
+    return false;
+  link_state_t s;
+  link_state(&s);
+  return link_actor() && s.action != 0;
+}
+
+/* the player can act: playing, no event, no message window, not paused */
+static bool has_control(void)
+{
+  dialog_t d;
+  dialog_read(&d);
+  return in_play() && !eventskip_running() && !dialog_open(&d) && !(gd_ready() && gd_game_paused(0, 0));
+}
+
+/* a menu item's value as item_value gives it ("10 (bug)", "on", "250") is the one wanted: the whole of it, its
+ * number, or the name in its brackets, case aside */
+static bool value_is(const char *now, const char *want)
+{
+  size_t n = strlen(want);
+  if (!n)
+    return false;
+  for (const char *p = now; *p; p++) {
+    bool starts = p == now || p[-1] == '(';
+    if (!starts)
+      continue;
+    size_t i = 0;
+    while (i < n && p[i] && lowercase(p[i]) == lowercase(want[i]))
+      i++;
+    if (i == n && (!p[i] || p[i] == ' ' || p[i] == ')'))
+      return true;
+  }
+  return false;
+}
+
+static bool cond_met(cond_t *c)
+{
+  dialog_t d;
+  actor_near_t a;
+  const char *map;
+  switch (c->kind) {
+  case U_CONTROL: return has_control();
+  case U_DIALOG: return dialog_read(&d) && dialog_open(&d);
+  case U_NODIALOG: return dialog_read(&d) && !dialog_open(&d);
+  case U_CHOICE: return dialog_read(&d) && d.state == DLG_CHOICE;
+  case U_EVENT: return eventskip_running();
+  case U_NOEVENT: return !eventskip_running();
+  case U_PAUSED: return gd_ready() && gd_game_paused(0, 0);
+  case U_WHEEL: return wheel_phase() == 2;
+  case U_UNPAUSED: return gd_ready() && !gd_game_paused(0, 0);
+  case U_MAP: map = gd_ready() ? gd_get_str(GD_STR_MAP) : 0; return map && same_name(map, c->arg) && in_play();
+  case U_ACTOR: return nearest_named(c->arg, c->metres, &a);
+  case U_STILL: {
+    link_state_t st;
+    link_state(&st);
+    bool rest = has_control() && st.moving && hypotf(st.vx, st.vz) < 0.01f && st.vy > -0.01f && st.vy < 0.01f;
+    c->still_for = rest ? c->still_for + 1 : 0;
+    return c->still_for >= STILL_FRAMES;
+  }
+  case U_ZR: {
+    link_state_t s;
+    link_state(&s);
+    return s.zr == c->zr;
+  }
+  case U_MOVED: {
+    vec3f_t now;
+    if (!has_control() || !link_drawn_pos(&now))
+      return false;
+    float dx = now.x - c->from.x, dy = now.y - c->from.y, dz = now.z - c->from.z;
+    return dx * dx + dy * dy + dz * dz > c->metres * c->metres;
+  }
+  case U_VALUE: {
+    menu_t *menu = 0;
+    menu_item_t *item = 0;
+    char now[160];
+    if (resolve(c->arg, &menu, &item) || !item)
+      return false;
+    item_value(item, now, sizeof(now));
+    return value_is(now, c->want);
+  }
+  default: return true;
+  }
+}
+
+/* a condition from args into *c, and its max (frames for wait until, rounds for repeat until) into *max if one
+ * is given; false if it isn't one */
+static bool parse_cond(char *args, cond_t *c, int32_t *max)
+{
+  char *what = take_word(&args);
+  memset(c, 0, sizeof(*c));
+  c->kind = same(what, "control") ? U_CONTROL : same(what, "dialog") ? U_DIALOG : same(what, "nodialog") ? U_NODIALOG
+          : same(what, "choice") ? U_CHOICE : same(what, "event") ? U_EVENT : same(what, "noevent") ? U_NOEVENT
+          : same(what, "paused") ? U_PAUSED : same(what, "unpaused") ? U_UNPAUSED : same(what, "map") ? U_MAP
+          : same(what, "moved") ? U_MOVED : same(what, "zr") ? U_ZR : same(what, "still") ? U_STILL
+          : same(what, "actor") ? U_ACTOR : same(what, "value") ? U_VALUE : same(what, "wheel") ? U_WHEEL : U_NONE;
+  c->metres = 10;
+  link_drawn_pos(&c->from);
+  if (c->kind == U_VALUE) { /* value <menu path> = <value> */
+    char *eq = args;
+    while (*eq && *eq != '=')
+      eq++;
+    if (!*eq)
+      return false;
+    *eq = 0;
+    trim_end(args);
+    snprintf(c->arg, sizeof(c->arg), "%s", skip_spaces(args));
+    args = eq + 1;
+    snprintf(c->want, sizeof(c->want), "%s", take_word(&args));
+    if (!c->arg[0] || !c->want[0])
+      return false;
+  }
+  if (c->kind == U_ZR && !parse_int(take_word(&args), &c->zr))
+    return false;
+  if (c->kind == U_MOVED) { /* an optional distance first: a number */
+    c->metres = 1;
+    args = skip_spaces(args);
+    double m;
+    if ((*args >= '0' && *args <= '9') || *args == '.') {
+      if (!parse_decimal(take_word(&args), &m) || m <= 0)
+        return false;
+      c->metres = (float)m;
+    }
+  }
+  if (c->kind == U_MAP || c->kind == U_ACTOR) {
+    char *name = take_word(&args);
+    if (!*name)
+      return false;
+    snprintf(c->arg, sizeof(c->arg), "%s", name);
+  }
+  for (char *word = take_word(&args); c->kind != U_NONE && *word; word = take_word(&args)) {
+    int32_t n;
+    double m;
+    if (same(word, "max") && parse_int(take_word(&args), &n) && n > 0)
+      *max = n;
+    else if (same(word, "within") && c->kind == U_ACTOR && parse_decimal(take_word(&args), &m) && m > 0)
+      c->metres = (float)m;
+    else
+      return false;
+  }
+  return c->kind != U_NONE;
+}
+
+static const char cond_usage[] = "control, dialog, nodialog, choice, event, noevent, paused, unpaused, wheel (the item "
+                                 "wheel open, taking the stick), moved [metres] "
+                                 "(somewhere else, with control), still (control and at rest for 8 frames), zr <item "
+                                 "number>, value <menu path> = <value>, map <name> (loaded) or actor <name> [within "
+                                 "<metres>], then max <%s>";
+
+/* "wait until <condition> [max <frames>]" */
+static void run_wait_until(char *args)
+{
+  int32_t max = UNTIL_DEFAULT;
+  until.waited = 0;
+  if (!parse_cond(args, &until.c, &max)) {
+    until.c.kind = U_NONE;
+    char usage[400];
+    snprintf(usage, sizeof(usage), cond_usage, "frames (1800 unless said)");
+    result(false, "wait until: %s", usage);
+    return;
+  }
+  until.left = max;
+}
+
+/* "talk [max <frames>]": press A through the message windows until the talk is over or a choice comes up */
+static void run_talk(char *args)
+{
+  int32_t frames = UNTIL_DEFAULT;
+  char *word = take_word(&args);
+  if (*word && (!same(word, "max") || !parse_int(take_word(&args), &frames) || frames < 1)) {
+    result(false, "talk: max <frames> (%d unless said)", UNTIL_DEFAULT);
+    return;
+  }
+  dialog_t d;
+  dialog_read(&d);
+  memset(&talk, 0, sizeof(talk));
+  talk.active = true;
+  talk.choose = -1;
+  talk.past_choice = d.state == DLG_CHOICE;
+  talk.left = frames;
+  talk.a_mask = button_mask("A");
+}
+
+/* "choose <n>": at a choice, move the cursor to option n (0 = the first) and take it with A */
+static void run_choose(char *args)
+{
+  int32_t n;
+  dialog_t d;
+  dialog_read(&d);
+  if (!parse_int(take_word(&args), &n) || n < 0 || n > 9) {
+    result(false, "choose: the option, 0 for the first");
+    return;
+  }
+  if (d.state != DLG_CHOICE && d.state != DLG_CHOICE_OPENING) {
+    result(false, "choose: no choice is up (dialog %s)", dialog_state_name(d.state));
+    return;
+  }
+  memset(&talk, 0, sizeof(talk));
+  talk.active = true;
+  talk.choose = n;
+  talk.left = UNTIL_DEFAULT;
+  talk.a_mask = button_mask("A");
+  talk.up_mask = button_mask("d-up");
+  talk.down_mask = button_mask("d-down");
+}
+
+/* once a game frame while choose runs */
+static void choose_frame(const dialog_t *d)
+{
+  talk.frames++;
+  if (talk.gap > 0) {
+    talk.gap--;
+    return;
+  }
+  if (d->state == DLG_CHOICE_OPENING)
+    return;
+  if (d->state != DLG_CHOICE) { /* taken */
+    talk.active = false;
+    result(true, "choose: took option %d after %d frames", talk.choose, talk.frames);
+    return;
+  }
+  if (--talk.left <= 0) {
+    talk.active = false;
+    result(false, "choose: the cursor stayed at %d", d->cursor);
+    return;
+  }
+  if (talk.messages) /* A pressed: wait for the window to leave the choice */
+    return;
+  if (d->cursor < talk.choose)
+    press(talk.down_mask);
+  else if (d->cursor > talk.choose)
+    press(talk.up_mask);
+  else {
+    press(talk.a_mask);
+    talk.messages = 1;
+  }
+}
+
+/* once a game frame while talk runs */
+static void talk_frame(void)
+{
+  dialog_t d;
+  dialog_read(&d);
+  if (talk.choose >= 0) {
+    choose_frame(&d);
+    return;
+  }
+  talk.frames++;
+  if (talk.past_choice && d.state != DLG_CHOICE)
+    talk.past_choice = false;
+  if (dialog_open(&d) && d.msg[0] && !same_name(d.msg, talk.msg)) {
+    snprintf(talk.msg, sizeof(talk.msg), "%s", d.msg);
+    talk.messages++;
+  }
+  if (d.state == DLG_CHOICE && !talk.past_choice) {
+    talk.active = false;
+    result(true, "talk: choice at %s, cursor %d, after %d frames and %d messages", d.msg, d.cursor, talk.frames,
+           talk.messages);
+    return;
+  }
+  bool event = eventskip_running();
+  talk.quiet = dialog_open(&d) || event ? 0 : talk.quiet + 1;
+  if (talk.quiet >= TALK_QUIET) {
+    talk.active = false;
+    result(true, "talk: over after %d frames, %d messages, last %s", talk.frames, talk.messages,
+           talk.msg[0] ? talk.msg : "-");
+    return;
+  }
+  if (--talk.left <= 0) {
+    talk.active = false;
+    result(false, "talk: still going after %d frames (dialog %s, event %s), last %s", talk.frames,
+           dialog_state_name(d.state), event ? "running" : "none", talk.msg[0] ? talk.msg : "-");
+    return;
+  }
+  /* A while the text types or waits; the page turning and the choices appearing need nothing */
+  if (talk.gap > 0) {
+    talk.gap--;
+  } else if (d.state == DLG_TYPING || d.state == DLG_WAITING) {
+    press(talk.a_mask);
+  }
 }
 
 /* Run one line. What it waits for, if anything, is left in the state above. */
@@ -1037,22 +1708,60 @@ static void run_line(char *line, bool held)
   menu_t *menu = 0;
   menu_item_t *item = 0;
 
-  if (same(verb, "id")) {
+  if (same(verb, "onerr")) {
+    char *how = take_word(&args);
+    if (same(how, "stop") || same(how, "go")) {
+      stop_on_error = same(how, "stop");
+      result(true, "onerr %s", how);
+    } else {
+      result(false, "onerr: stop (end the script at a line that fails) or go");
+    }
+  } else if (same(verb, "id")) {
     snprintf(script_id, sizeof(script_id), "%s", *args ? take_word(&args) : "-");
+  } else if (same(verb, "repeat") && starts_word(args, "until")) { /* repeat until <condition> [max <rounds>] */
+    char *rest = args;
+    int32_t max = REPEAT_UNTIL_DEFAULT;
+    cond_t c;
+    take_word(&rest);
+    if (repeat_depth >= REPEAT_DEPTH)
+      result(false, "repeat: more than %d inside one another", REPEAT_DEPTH);
+    else if (!parse_cond(rest, &c, &max)) {
+      char usage[400];
+      snprintf(usage, sizeof(usage), cond_usage, "rounds (100 unless said)");
+      result(false, "repeat until: %s", usage);
+    } else {
+      repeat_until[repeat_depth].on = true;
+      repeat_until[repeat_depth].c = c;
+      repeat_until[repeat_depth].rounds = 0;
+      repeats[repeat_depth].cursor = cursor;
+      repeats[repeat_depth].line_no = line_no;
+      repeats[repeat_depth++].left = max;
+    }
   } else if (same(verb, "repeat")) {
     if (!parse_int(args, &number) || number < 1)
       result(false, "repeat: how many times");
     else if (repeat_depth >= REPEAT_DEPTH)
       result(false, "repeat: more than %d inside one another", REPEAT_DEPTH);
     else {
+      repeat_until[repeat_depth].on = false;
       repeats[repeat_depth].cursor = cursor;
       repeats[repeat_depth].line_no = line_no;
       repeats[repeat_depth++].left = number;
     }
   } else if (same(verb, "end")) {
+    int top = repeat_depth - 1;
     if (!repeat_depth)
       result(false, "end: no repeat to end");
-    else if (--repeats[repeat_depth - 1].left > 0) {
+    else if (repeat_until[top].on && (++repeat_until[top].rounds, cond_met(&repeat_until[top].c))) {
+      result(true, "until met after %d rounds", repeat_until[top].rounds);
+      repeat_depth--;
+    } else if (repeat_until[top].on && repeat_until[top].rounds >= repeats[top].left) {
+      result(false, "until: not met after %d rounds", repeat_until[top].rounds);
+      repeat_depth--;
+    } else if (repeat_until[top].on) {
+      cursor = repeats[top].cursor;
+      line_no = repeats[top].line_no;
+    } else if (--repeats[repeat_depth - 1].left > 0) {
       cursor = repeats[repeat_depth - 1].cursor;
       line_no = repeats[repeat_depth - 1].line_no;
     } else {
@@ -1063,7 +1772,10 @@ static void run_line(char *line, bool held)
   } else if (same(verb, "status")) {
     run_status(held);
   } else if (same(verb, "place")) {
-    run_place(args);
+    if (args[0] == 'n' && args[1] == 'e' && args[2] == 'a' && args[3] == 'r' && (args[4] == ' ' || !args[4]))
+      run_place_near(skip_spaces(args + 4));
+    else
+      run_place(args);
   } else if (same(verb, "actor")) {
     run_actor(args);
   } else if (same(verb, "texdump")) {
@@ -1271,6 +1983,12 @@ static void run_line(char *line, bool held)
     run_actors(args);
   } else if (same(verb, "spawn")) {
     run_spawn(args);
+  } else if (same(verb, "flag")) {
+    run_flag(args);
+  } else if (same(verb, "str")) {
+    run_str(args);
+  } else if (same(verb, "event")) {
+    run_event(args);
   } else if (same(verb, "trace")) {
     if (same(args, "off"))
       number = 0;
@@ -1280,6 +1998,16 @@ static void run_line(char *line, bool held)
     }
     trace_left = number;
     result(true, "trace %d", (int)number);
+  } else if (same(verb, "talk")) {
+    run_talk(args);
+  } else if (same(verb, "choose")) {
+    run_choose(args);
+  } else if (same(verb, "wait") && args[0] == 'u' && args[1] == 'n') {
+    char *rest = args;
+    if (!same(take_word(&rest), "until"))
+      result(false, "wait: a number of frames, or until ...");
+    else
+      run_wait_until(skip_spaces(rest));
   } else if (same(verb, "wait")) {
     if (!parse_int(args, &number) || number < 0)
       result(false, "wait: a number of frames");
@@ -1359,6 +2087,25 @@ static void run_line(char *line, bool held)
       result(false, "list: %s", problem);
     else
       list_menu(item ? item->submenu : menu);
+  } else if (same(verb, "menu")) {
+    /* what the menu on screen shows: where it is and which item the cursor is on */
+    if (!menu_current)
+      result(true, "menu closed");
+    else {
+      char path[200] = "", line[160] = "";
+      const menu_t *chain[8];
+      int depth = 0;
+      for (const menu_t *m = menu_current; m && m->parent && depth < 8; m = m->parent)
+        chain[depth++] = m; /* the top menu has no name in a path */
+      for (int i = depth - 1, at = 0; i >= 0 && at < (int)sizeof(path) - 1; i--)
+        at += snprintf(path + at, sizeof(path) - (size_t)at, "%s%s", at ? "/" : "", chain[i]->title);
+      menu_t *m = menu_current;
+      bool on_item = m->selected >= 0 && m->selected < m->n_items;
+      if (on_item)
+        menu_item_line(&m->items[m->selected], line, sizeof(line));
+      result(true, "menu open path=[%s] cursor=@%d kind=%s editing=%d line=[%s]", path, m->selected,
+             on_item ? kind_names[m->items[m->selected].kind] : "-", menu_editing != 0, line);
+    }
   } else if (same(verb, "open")) {
     /* the menu on screen at that menu, or at that item of its menu (for a look at it) */
     problem = resolve(args, &menu, &item);
@@ -1473,6 +2220,7 @@ static void poll(void)
   script[got] = 0;
   cursor = 0;
   repeat_depth = 0;
+  stop_on_error = false;
   running = true;
 }
 
@@ -1489,16 +2237,39 @@ static bool waiting(bool held)
   }
   if (spawning.active && spawn_waiting())
     return true;
+  if ((talk.active || placing.active || until.c.kind != U_NONE) && held && !stepping && script_held) {
+    /* held by this script's own pause: nothing would let the game go, so it ends here rather than never. A hold
+     * from frame advance's buttons just pauses it: it goes on when the game does. */
+    const char *what = talk.active ? (talk.choose >= 0 ? "choose" : "talk") : placing.active ? "place" : "until";
+    talk.active = placing.active = false;
+    until.c.kind = U_NONE;
+    result(false, "%s: the script holds the game (step or run lets it go)", what);
+  }
+  if (talk.active || placing.active)
+    return true;
+  if (until.c.kind != U_NONE) {
+    if (cond_met(&until.c)) {
+      until.c.kind = U_NONE;
+      result(true, "until met after %d frames", until.waited);
+    } else if (until.left <= 0) {
+      until.c.kind = U_NONE;
+      result(false, "until: not met after %d frames", until.waited);
+    } else {
+      return true;
+    }
+  }
   if (pause_waiting) {
     if (!held)
       return true;
     pause_waiting = false;
+    script_held = true;
     result(true, "paused");
   }
   if (stepping) {
     if (steps_left > 0 || !held)
       return true;
     stepping = false;
+    script_held = true;
     result(true, "stepped");
   }
   if (run_waiting) {
@@ -1518,6 +2289,18 @@ static bool waiting(bool held)
   return false;
 }
 
+/* onerr stop: end the script, and anything its last line left waiting */
+static void stop_script(void)
+{
+  stop_now = false;
+  running = false;
+  wait_left = 0;
+  talk.active = false;
+  placing.active = false;
+  until.c.kind = U_NONE;
+  out_line("end (onerr stop)");
+}
+
 void remote_frame(bool held)
 {
   frametrace_write(); /* the debugging captures the render thread made: written here, on the game's thread */
@@ -1532,6 +2315,7 @@ void remote_frame(bool held)
     return;
   }
   if (!held) { /* a frame of the game */
+    script_held = false;
     for (int c = 0; c < CMD_COUNT; c++)
       if (fire_pending[c]) {
         binds_fire((command_t)c, fire_pending[c] - 1);
@@ -1543,15 +2327,29 @@ void remote_frame(bool held)
       wait_left--;
     if (spawning.active) /* frames since the spawn line */
       spawning.frames++;
+    if (until.c.kind != U_NONE) {
+      until.left--;
+      until.waited++;
+    }
+    if (talk.active)
+      talk_frame();
+    if (placing.active)
+      place_frame();
     if (trace_left > 0) { /* this frame's, before any line of it runs */
       trace_line();
       trace_left--;
     }
   }
+  if (stop_now)
+    stop_script();
   if (!running)
     poll();
   size_t traced = out_len; /* more than the trace's lines after this: the sender is waiting to read it */
   for (int lines = 0; running && lines < LINES_PER_CALL && !waiting(held); lines++) {
+    if (stop_now) { /* a wait just ended in an error */
+      stop_script();
+      break;
+    }
     char *line = next_line();
     if (!line) {
       running = false;
@@ -1559,6 +2357,10 @@ void remote_frame(bool held)
       break;
     }
     run_line(line, held);
+    if (stop_now) {
+      stop_script();
+      break;
+    }
   }
   /* a trace alone is written a buffer at a time, not a file write a frame; its last frames at once */
   if (out_len != traced || trace_left <= 0 || out_len > OUT_MAX - 512)

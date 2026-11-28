@@ -17,15 +17,32 @@ const char *T(const char *english) { return english; }
 void gfx_logf(const char *fmt, ...) {}
 void log_printf(const char *fmt, ...) {}
 bool settings_sd(void) { return true; }
+static float test_moved_x; /* a warp or teleport moves Link this far in x */
+static bool test_follow;    /* a load position puts Link where it says (else he stays put) */
+static vec3f_t test_placed_at;
+static bool test_was_placed;
 bool link_drawn_pos(vec3f_t *out)
 {
-  *out = (vec3f_t){ 1.5f, 2, -3 };
+  *out = test_was_placed ? test_placed_at : (vec3f_t){ 1.5f + test_moved_x, 2, -3 };
   return true;
 }
 bool gd_ready(void) { return true; }
-const char *gd_get_str(uint32_t hash) { return "KokiriForest"; }
+static char test_str[64] = "KokiriForest";
+const char *gd_get_str(uint32_t hash) { return test_str; }
+bool gd_set_str(uint32_t hash, const char *v) { snprintf(test_str, sizeof(test_str), "%s", v); return true; }
 bool gd_game_paused(bool *is_pause, int32_t *pause_requests) { return false; }
+/* flag: one Bool field, 0x39d7877d, and nothing else */
+static bool test_flag;
+uint32_t murmur3(const char *s) { return s[0] == 'M' ? 0x39d7877du : 1u; }
+bool gd_get_bool(uint32_t hash, bool *out) { if (hash != 0x39d7877du) return false; *out = test_flag; return true; }
+bool gd_set_bool(uint32_t hash, bool value) { if (hash != 0x39d7877du) return false; test_flag = value; return true; }
+bool gd_get_int(uint32_t hash, int32_t *out) { return false; }
+bool gd_poke_int(uint32_t hash, int32_t value) { return false; }
+static const char *test_screen = "None";
+const char *gd_menu_screen_name(void) { return test_screen; }
 const char *warp_state(void) { return ""; }
+bool warp_request_event(const char *name) { return (void)name, false; }
+bool warp_request_event_from(const char *name, const float transform[12], uintptr_t actor) { return (void)name, (void)transform, (void)actor, false; }
 /* Link's actor and the player object, as status and trace read them at 1.1.1's offsets (z64hd.h): his velocity at
  * +0x388, the item on ZR and in hand at the player object's +0x7D0 and +0x7D8 (the jump height's address is that
  * object + 0x18E8), and his actions through three pointers to the action table. A build whose offsets aren't
@@ -37,6 +54,7 @@ static const struct z64hd_build build_1_1_1 = {
 };
 static const struct z64hd_build build_unknown = { .version = "1.0.0" };
 const struct z64hd_build *z64hd_game = &build_1_1_1;
+uintptr_t z64hd_main;
 static _Alignas(8) uint8_t actor_mem[0x400], player_mem[0x1D00];
 static float facing_x = 1, facing_z = 0;
 uintptr_t link_actor(void) { return (uintptr_t)actor_mem; }
@@ -68,13 +86,22 @@ static link_record_status_t record = REC_READY;
 static int position_loads;
 static double placed[4];
 link_record_status_t link_record_status(void) { return record; }
-void position_load(void) { position_loads++; }
+bool position_busy(void) { return false; }
+void position_load(void)
+{
+  position_loads++;
+  if (test_follow) {
+    test_placed_at = (vec3f_t){ (float)placed[0], (float)placed[1], (float)placed[2] };
+    test_was_placed = true;
+  }
+}
 void position_set(double x, double y, double z, double facing)
 {
   placed[0] = x, placed[1] = y, placed[2] = z, placed[3] = facing;
 }
-static actor_near_t actors_there[3] = { { .name = "Npc_Kokiri", .distance = 2.5f }, { .name = "Obj_Sign", .distance = 4.25f },
-                                        { .name = "Npc_Far", .distance = 30 } };
+static actor_near_t actors_there[3] = { { .name = "Npc_Kokiri", .distance = 2.5f, .pos = { 1.5f, 2, -0.5f } },
+                                        { .name = "Obj_Sign", .distance = 4.25f, .pos = { 5.75f, 2, -3 } },
+                                        { .name = "Npc_Far", .distance = 30, .pos = { 31.5f, 2, -3 } } };
 /* spawn's side: the names offered, and the game's create, whose actor is made spawn_delay frames after the request */
 const char *const actor_names[] = { "Enemy_Wolfos", "Obj_Pot_A_01" };
 const int actor_names_count = 2;
@@ -107,6 +134,28 @@ bool actor_read(uintptr_t actor, actor_read_t *out)
   return true;
 }
 
+/* the message window and the running event, as the test sets them */
+static dialog_t test_dialog = { DLG_CLOSED, 12, -1, "" };
+static const char *test_event; /* 0: none runs */
+bool dialog_read(dialog_t *out)
+{
+  *out = test_dialog;
+  return true;
+}
+const char *dialog_state_name(dialog_state_t state)
+{
+  static const char *const names[] = { "?", "closed", "typing", "waiting", "turning", "choices", "choice", "other" };
+  return names[state];
+}
+bool dialog_open(const dialog_t *d) { return d->state != DLG_CLOSED && d->state != DLG_UNKNOWN; }
+bool eventskip_running(void) { return test_event != 0; }
+static int test_wheel; /* 0 closed, 1 opening, 2 open */
+int wheel_phase(void) { return test_wheel; }
+bool eventskip_flow_name(char out[EVENTSKIP_NAME_MAX])
+{
+  snprintf(out, EVENTSKIP_NAME_MAX, "%s", test_event ? test_event : "");
+  return test_event != 0;
+}
 int actors_near(float radius, actor_near_t *out, int max)
 {
   int n = 0;
@@ -237,6 +286,7 @@ bool pausemgr_set_masks(uint32_t id, const uint32_t masks[3], uint32_t was[3]) {
 bool physdump_write(const char *name, int *records, int64_t *bytes) { return (void)name, (void)records, (void)bytes, false; }
 bool pouch_button(int slot, const char *choice, uint32_t *was) { return (void)slot, (void)choice, (void)was, false; }
 bool pouch_equip_shield_now(const char *item) { return (void)item, false; }
+void menu_item_line(menu_item_t *it, char *buf, int len) { snprintf(buf, len, "%s", it->label ? it->label : ""); }
 
 void menu_close(void)
 {
@@ -401,7 +451,7 @@ int main(void)
 
   /* status: the frame, the map, where Link is and which way he faces, how he moves (nothing yet), the game held */
   run_script("status\n");
-  out_has(" 1 ok frame=");
+  out_has(" 1 ok screen=None wheel=closed dialog=closed msg=- event=- frame=");
   out_has(" map=KokiriForest link=yes x=1.500 y=2.000 z=-3.000 facing=90.0 vy=0.000 hs=0.000 hand=0 zr=0 lock=0 "
           "ground=0 act=-1 wpn=-1 held=0 menu=0 game_paused=0 warp=-\n");
 
@@ -433,7 +483,7 @@ int main(void)
   assert(!strstr(out_file, "stepped")); /* the third frame ran; held again before the step is done */
   remote_frame(true);
   out_has(" 5 ok stepped\n");
-  out_has(" 6 ok frame=");
+  out_has(" 6 ok screen=None wheel=closed dialog=closed msg=- event=- frame=");
   out_has(" map=KokiriForest link=yes x=1.500 y=2.000 z=-3.000 facing=90.0 vy=0.000 hs=0.000 ");
   out_has(" act=-1 wpn=-1 held=1 menu=0 game_paused=0 warp=-\n");
   assert(remote_take_run() && !remote_take_run() && running);
@@ -522,8 +572,8 @@ int main(void)
   }
   z64hd_game = &build_1_1_1;
   run_script("actors\nactors 3\nactors far\n");
-  out_has(" 1 | 2.50 Npc_Kokiri\n");
-  out_has(" 1 | 4.25 Obj_Sign\n");
+  out_has(" 1 | 2.50 Npc_Kokiri 1.50 2.00 -0.50\n");
+  out_has(" 1 | 4.25 Obj_Sign 5.75 2.00 -3.00\n");
   out_has(" 1 ok 2 actors within 6 m\n");
   out_has(" 2 ok 1 actors within 3 m\n");
   out_has(" 3 err actors: a distance in metres\n");
@@ -543,9 +593,10 @@ int main(void)
   spawn_refused = 0;
 
   /* place: the saved position set and loaded; facing as now unless given; refused while Link's record isn't known */
+  test_follow = true; /* he goes where load position says at once */
   run_script("place -12.45 110.36 4.66 250\nplace 1 2.5 -3\nplace 1 2\nplace 1 2 x\n");
-  out_has(" 1 ok place -12.450 110.360 4.660 facing 250.0\n");
-  out_has(" 2 ok place 1.000 2.500 -3.000 facing 90.0\n");
+  out_has(" 1 ok place -12.450 110.360 4.660 facing 250.0 after 1 frames\n");
+  out_has(" 2 ok place 1.000 2.500 -3.000 facing 90.0 after 1 frames\n");
   out_has(" 3 err place: x y z");
   out_has(" 4 err place: x y z");
   assert(position_loads == 2 && placed[0] == 1 && placed[1] == 2.5 && placed[2] == -3 && placed[3] > 89.9);
@@ -554,6 +605,330 @@ int main(void)
   out_has(" 1 err place: Link not found\n");
   assert(position_loads == 2);
   record = REC_READY;
+  /* the first load only finds his record: the line loads again every 20 frames until he's there */
+  test_follow = false;
+  test_was_placed = false;
+  out_size = 0;
+  out_file[0] = 0;
+  send("place 7 2 7\n");
+  for (int i = 0; i < POLL_CALLS + 30; i++)
+    frame();
+  assert(running && position_loads == 4); /* the first, and one 20 frames on */
+  test_follow = true;
+  for (int i = 0; i < 25 && (cmd_there || running); i++)
+    frame();
+  out_has(" 1 ok place 7.000 2.000 7.000 facing ");
+  assert(position_loads == 5 && placed[0] == 7);
+  /* never there: an error after 120 frames */
+  test_follow = false;
+  test_was_placed = false;
+  out_size = 0;
+  out_file[0] = 0;
+  send("place 9 2 9\n");
+  for (int i = 0; i < POLL_CALLS + 130 && (cmd_there || running); i++)
+    frame();
+  out_has(" 1 err place: Link not there after 120 frames (at 1.50 2.00 -3.00)\n");
+
+  /* place near: the given metres from the nearest actor of that name, on Link's side of it, facing it. Link is at
+   * (1.5, -3): 1 m from Npc_Kokiri (1.5, -0.5) towards him is (1.5, -1.5), facing +z (0 degrees) */
+  test_follow = true;
+  run_script("place near Npc_Kokiri 1\n");
+  out_has(" 1 ok place near Npc_Kokiri (1.50 2.00 -0.50): 1.500 2.000 -1.500 facing 0.0 after 1 frames\n");
+  test_was_placed = false;
+  run_script("place near Obj_Sign\n");
+  out_has(" 1 ok place near Obj_Sign (5.75 2.00 -3.00): 4.550 2.000 -3.000 facing 90.0 after 1 frames\n");
+  assert(placed[0] > 4.549 && placed[0] < 4.551 && placed[2] == -3 && placed[3] > 89.9 && placed[3] < 90.1);
+  test_was_placed = false;
+  test_follow = false;
+  run_script("place near Nobody\nplace near\n");
+  out_has(" 1 err place near: no Nobody within 60 m\n");
+  out_has(" 2 err place near: an actor's name");
+
+  /* status: the message window's state and message, and the running event */
+  test_dialog = (dialog_t){ DLG_CHOICE, 4, 1, "Npc_Soldier:Talk_03" };
+  test_event = "Npc_Soldier";
+  run_script("status\n");
+  out_has(" 1 ok screen=None wheel=closed dialog=choice:1 msg=Npc_Soldier:Talk_03 event=Npc_Soldier frame=");
+
+  /* wait until: met at once, met later, never met (max), and wrong lines */
+  run_script("wait until choice\nwait until actor Npc_Kokiri within 3\nwait until noevent max 5\necho after\n");
+  out_has(" 1 ok until met after 0 frames\n");
+  out_has(" 2 ok until met after 0 frames\n");
+  out_has(" 3 err until: not met after 5 frames\n");
+  out_has(" 4 ok after\n");
+  out_size = 0;
+  out_file[0] = 0;
+  send("wait until control max 100\necho in control\n");
+  for (int i = 0; i < POLL_CALLS + 3; i++)
+    frame();
+  assert(running && !strstr(out_file, "met"));
+  test_dialog = (dialog_t){ DLG_CLOSED, 12, -1, "" };
+  test_event = 0;
+  for (int i = 0; i < 3; i++)
+    frame();
+  out_has(" 1 ok until met after ");
+  out_has(" 2 ok in control\n");
+  run_script("wait until\nwait until map\nwait until actor X within\nwait until dialog max 0\nwait untilx\n");
+  out_has(" 1 err wait until: control, dialog");
+  out_has(" 2 err wait until:");
+  out_has(" 3 err wait until:");
+  out_has(" 4 err wait until:");
+  out_has(" 5 err wait: a number of frames, or until ...\n");
+  /* control and map need the game in play: no Loading screen */
+  test_screen = "Loading";
+  run_script("wait until control max 3\nwait until map KokiriForest max 3\n");
+  out_has(" 1 err until: not met after 3 frames\n");
+  out_has(" 2 err until: not met after 3 frames\n");
+  test_screen = "None";
+  /* moved: Link somewhere else (over the distance, 1 m unless said) and in control */
+  out_size = 0;
+  out_file[0] = 0;
+  send("wait until moved max 60\nwait until moved 5 max 3\nwait until moved x\n");
+  for (int i = 0; i < POLL_CALLS + 3; i++)
+    frame();
+  assert(running && !strstr(out_file, "met")); /* not moved yet */
+  test_dialog = (dialog_t){ DLG_WAITING, 3, -1, "Npc:Talk_1" }; /* moved, but a window is up: no control */
+  test_moved_x = 2;
+  for (int i = 0; i < 3; i++)
+    frame();
+  assert(!strstr(out_file, "met"));
+  test_dialog = (dialog_t){ DLG_CLOSED, 12, -1, "" };
+  for (int i = 0; i < 10 && (cmd_there || running); i++)
+    frame();
+  out_has(" 1 ok until met after ");
+  out_has(" 2 err until: not met after 3 frames\n"); /* 2 m from where its wait began is fine: 0 from there */
+  out_has(" 3 err wait until:");
+  test_moved_x = 0;
+
+  /* talk: A while the text types or waits, nothing while a page turns; each A here moves the window on: typing to
+   * waiting, waiting to the next message (three, then a choice, or closed) */
+  {
+    static const char *const msgs[] = { "Npc:Talk_1", "Npc:Talk_2", "Npc:Talk_3" };
+    for (int ending = 0; ending < 2; ending++) {
+      int at = 0, presses = 0;
+      bool was_down = false;
+      test_dialog = (dialog_t){ DLG_TYPING, 2, -1, "" };
+      snprintf(test_dialog.msg, sizeof(test_dialog.msg), "%s", msgs[0]);
+      test_event = "Npc";
+      out_size = 0;
+      out_file[0] = 0;
+      send("talk max 400\necho done\n");
+      for (int i = 0; i < 400 && (cmd_there || running); i++) {
+        frame();
+        bool down = input_remote_active && (input_remote_buttons & 1u) != 0;
+        if (down && !was_down) { /* a press */
+          presses++;
+          if (test_dialog.state == DLG_TYPING)
+            test_dialog.state = DLG_WAITING;
+          else if (test_dialog.state == DLG_WAITING && ++at < 3) {
+            test_dialog = (dialog_t){ DLG_TYPING, 2, -1, "" };
+            snprintf(test_dialog.msg, sizeof(test_dialog.msg), "%s", msgs[at]);
+          } else if (test_dialog.state == DLG_WAITING && ending == 0) {
+            test_dialog = (dialog_t){ DLG_CHOICE, 4, 0, "Npc:Talk_3" };
+          } else if (test_dialog.state == DLG_WAITING) {
+            test_dialog = (dialog_t){ DLG_CLOSED, 12, -1, "" };
+            test_event = 0;
+          }
+        }
+        was_down = down;
+      }
+      if (ending == 0)
+        out_has(" 1 ok talk: choice at Npc:Talk_3, cursor 0, after ");
+      else
+        out_has(" 1 ok talk: over after ");
+      out_has(" 3 messages");
+      out_has(" 2 ok done\n");
+      assert(presses == 6);
+    }
+    /* choose: Down until the cursor is on the option, then A; talk started on that choice doesn't stop at it */
+    uint32_t down_mask = 0, a_mask = 0, bind;
+    if (bind_parse("d-down", &bind))
+      down_mask = bind_mask(bind) & 0xFFFF;
+    if (bind_parse("A", &bind))
+      a_mask = bind_mask(bind) & 0xFFFF;
+    test_dialog = (dialog_t){ DLG_CHOICE, 4, 0, "Npc:Talk_3" };
+    test_event = "Npc";
+    out_size = 0;
+    out_file[0] = 0;
+    send("choose 2\ntalk max 300\nchoose 1\nchoose x\n");
+    int downs = 0, after_a = -1;
+    bool was = false;
+    for (int i = 0; i < 400 && (cmd_there || running); i++) {
+      frame();
+      bool down = input_remote_active && input_remote_buttons != 0;
+      if (down && !was) {
+        if (input_remote_buttons == down_mask)
+          test_dialog.cursor++, downs++;
+        else if (input_remote_buttons == a_mask && test_dialog.state == DLG_CHOICE)
+          after_a = 0; /* the window stays on the choice a few frames after A */
+        else if (input_remote_buttons == a_mask && test_dialog.state == DLG_WAITING) {
+          test_dialog = (dialog_t){ DLG_CLOSED, 12, -1, "" };
+          test_event = 0;
+        }
+      }
+      was = down;
+      if (after_a >= 0 && ++after_a == 8)
+        test_dialog = (dialog_t){ DLG_WAITING, 3, -1, "Npc:Talk_4" };
+    }
+    assert(downs == 2);
+    out_has(" 1 ok choose: took option 2 after ");
+    out_has(" 2 ok talk: over after ");
+    out_has(" 3 err choose: no choice is up (dialog closed)\n");
+    out_has(" 4 err choose: the option, 0 for the first\n");
+    test_dialog = (dialog_t){ DLG_TURNING, 6, -1, "Npc:Talk_9" };
+    test_event = "Npc";
+    out_size = 0;
+    out_file[0] = 0;
+    send("talk max 20\ntalk max\n");
+    for (int i = 0; i < 60 && (cmd_there || running); i++)
+      frame();
+    out_has(" 1 err talk: still going after 20 frames (dialog turning, event running), last Npc:Talk_9\n");
+    out_has(" 2 err talk: max <frames>");
+    test_dialog = (dialog_t){ DLG_CLOSED, 12, -1, "" };
+    test_event = 0;
+  }
+
+  /* still: control and Link at rest for 8 frames in a row (his velocity is the actor's, at +0x388) */
+  {
+    float v[3] = { 0.5f, 0, 0 };
+    memcpy(actor_mem + 0x388, v, sizeof(v));
+    out_size = 0;
+    out_file[0] = 0;
+    send("wait until still max 60\necho rest\n");
+    for (int i = 0; i < POLL_CALLS + 10; i++)
+      frame();
+    assert(running && !strstr(out_file, "met")); /* still sliding */
+    v[0] = 0;
+    memcpy(actor_mem + 0x388, v, sizeof(v));
+    for (int i = 0; i < 6; i++)
+      frame();
+    assert(!strstr(out_file, "met")); /* at rest, but not 8 frames yet */
+    for (int i = 0; i < 6 && (cmd_there || running); i++)
+      frame();
+    out_has(" 1 ok until met after ");
+    out_has(" 2 ok rest\n");
+  }
+
+  /* value: a menu item's value (its number, or its name in brackets); repeat until: rounds until met */
+  run_script("set cheats/rupees = 250\nwait until value cheats/rupees = 250 max 3\nwait until value cheats/rupees = 9 max 3\n"
+             "wait until value cheats/rupees max 3\n");
+  out_has(" 2 ok until met after 0 frames\n");
+  out_has(" 3 err until: not met after 3 frames\n");
+  out_has(" 4 err wait until: control");
+  run_script("set cheats/speed = fast\nwait until value cheats/speed = fast max 2\nwait until value cheats/speed = Fast max 2\n");
+  out_has(" 2 ok until met after 0 frames\n");
+  out_has(" 3 ok until met after 0 frames\n");
+  run_script("set cheats/rupees = 1\nrepeat until value cheats/rupees = 4 max 10\nset cheats/rupees = 2\nset cheats/rupees = 4\n"
+             "end\necho after\nrepeat until value cheats/rupees = 7 max 3\necho round\nend\nrepeat until nonsense\n");
+  out_has(" 5 ok until met after 1 rounds\n");
+  out_has(" 6 ok after\n");
+  out_has(" 9 err until: not met after 3 rounds\n");
+  out_has(" 10 err repeat until: control");
+
+  /* wheel: met once the item wheel is open (phase 2), not while it opens */
+  test_wheel = 1;
+  out_size = 0;
+  out_file[0] = 0;
+  send("wait until wheel max 20\nstatus\n");
+  for (int i = 0; i < POLL_CALLS + 3; i++)
+    frame();
+  assert(running && !strstr(out_file, "met"));
+  test_wheel = 2;
+  for (int i = 0; i < 3 && (cmd_there || running); i++)
+    frame();
+  out_has(" 1 ok until met after ");
+  out_has(" 2 ok screen=None wheel=open dialog=");
+  test_wheel = 0;
+
+  /* event: refused where the build's functions aren't known (the test build has none) */
+  run_script("event Some_Event\nevent\n");
+  out_has(" 1 err event: not known for this game version\n");
+  out_has(" 2 err event: an event's name\n");
+  /* event with a starter: wrong forms, and refused where the build's starter fields aren't known */
+  run_script("event E actor\nevent E at 1 2\nevent E there\nevent E at 1 2 3\n");
+  out_has(" 1 err event: actor <name>\n");
+  out_has(" 2 err event: at <x> <y> <z> [facing]\n");
+  out_has(" 3 err event: <name> [here | actor <name> | at <x> <y> <z> [facing]]\n");
+  out_has(" 4 err event: a starter isn't known for this game version\n");
+
+  /* flag: read a Bool, set it, by name or hash; no such field; bad hash or value */
+  run_script("flag Market_A\nflag Market_A 1\nflag 0x39d7877d\nflag 0x39d7877d 0\nflag Other\nflag 0xZZ\n"
+             "flag Market_A x\nflag\n");
+  out_has(" 1 ok Market_A 0x39d7877d bool 0\n");
+  out_has(" 2 ok Market_A 0x39d7877d bool 1\n");
+  out_has(" 3 ok 0x39d7877d 0x39d7877d bool 1\n");
+  out_has(" 4 ok 0x39d7877d 0x39d7877d bool 0\n");
+  out_has(" 5 err flag: no Bool or Int field Other (0x00000001)\n");
+  out_has(" 6 err flag: 0xZZ is not a hash\n");
+  out_has(" 7 err flag: the value is a number\n");
+  out_has(" 8 err flag: a field name");
+
+  /* held by a hand (frame advance's buttons): a wait until just pauses, and goes on when the game does */
+  out_size = 0;
+  out_file[0] = 0;
+  test_event = "Npc";
+  send("wait until noevent max 100\necho after\n");
+  for (int i = 0; i < POLL_CALLS + 3; i++)
+    frame();
+  for (int i = 0; i < 200; i++)
+    remote_frame(true); /* more than its max: held frames don't count */
+  assert(running && !strstr(out_file, " 1 "));
+  test_event = 0;
+  for (int i = 0; i < 3; i++)
+    frame();
+  out_has(" 1 ok until met after ");
+  out_has(" 2 ok after\n");
+  /* held by the script's own pause: nothing would let the game go, so it ends with an error */
+  out_size = 0;
+  out_file[0] = 0;
+  test_event = "Npc";
+  send("pause\nwait until noevent max 100\necho after\n");
+  for (int i = 0; i < POLL_CALLS + 3 && !pause_wanted; i++)
+    frame();
+  assert(remote_take_pause());
+  remote_frame(true);
+  out_has(" 1 ok paused\n");
+  out_has(" 2 err until: the script holds the game (step or run lets it go)\n");
+  out_has(" 3 ok after\n");
+  test_event = 0;
+  frame(); /* the game runs again */
+
+  /* menu: closed, or where the menu on screen is and the item under the cursor */
+  menu_current = 0;
+  run_script("menu\n");
+  out_has(" 1 ok menu closed\n");
+  m_cheats.selected = 2;
+  menu_current = &m_cheats;
+  run_script("menu\n");
+  out_has(" 1 ok menu open path=[cheats] cursor=@2 kind=number editing=0 line=[rupees]\n");
+  menu_current = 0;
+  m_cheats.selected = 0;
+
+  /* str: read, set, empty */
+  run_script("str Sequence_CurrentBanc\nstr Sequence_CurrentBanc Market_Child\nstr X -\nstr X KokiriForest\n");
+  out_has(" 1 ok Sequence_CurrentBanc 0x00000001 = \"KokiriForest\"\n");
+  out_has(" 2 ok Sequence_CurrentBanc 0x00000001 = \"Market_Child\"\n");
+  out_has(" 3 ok X 0x00000001 = \"\"\n");
+
+  /* onerr stop: the first failing line ends the script (and what it waits for); onerr go: carries on */
+  run_script("onerr stop\necho a\nwait until\necho b\n");
+  out_has(" 1 ok onerr stop\n");
+  out_has(" 3 err wait until:");
+  out_has("end (onerr stop)\n");
+  assert(!strstr(out_file, " ok b\n"));
+  out_size = 0;
+  out_file[0] = 0;
+  send("onerr stop\nwait until noevent max 3\necho b\n");
+  test_event = "Npc";
+  for (int i = 0; i < POLL_CALLS + 10 && (cmd_there || running); i++)
+    frame();
+  out_has(" 2 err until: not met after 3 frames\n");
+  out_has("end (onerr stop)\n");
+  assert(!strstr(out_file, " ok b\n"));
+  test_event = 0;
+  run_script("wait until\necho c\nonerr x\n"); /* a new script starts with onerr go */
+  out_has(" 2 ok c\n");
+  out_has(" 3 err onerr: stop");
 
   /* title: refused at once with the reason; otherwise the script waits until Link is gone (ok) or it failed (err),
    * and goes on after it */

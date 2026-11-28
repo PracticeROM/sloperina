@@ -4,6 +4,7 @@
 #define EVENTSKIP_H
 
 #include <stdbool.h>
+#include <stddef.h>
 
 bool eventskip_known(void);   /* this build's event layout is known */
 bool eventskip_running(void); /* an event is running */

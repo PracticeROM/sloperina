@@ -226,6 +226,30 @@ bool warp_request_event(const char *name)
   return manager && finish_request(manager, true);
 }
 
+bool warp_request_event_from(const char *name, const float transform[12], uintptr_t actor)
+{
+  /* the starter's handle (+0x38) is the request's SUB_A, which destroy_request destroys */
+  if (!z64hd_game->event_req_starter_mtx || !z64hd_game->actor_handle_entry ||
+      z64hd_game->event_req_starter_mtx + 0x38 != Z64HD_EVENT_REQ_SUB_A)
+    return false;
+  void *manager = begin_request(name);
+  if (!manager)
+    return false;
+  /* The transform, then the handle: its entry (+8) and id (+0x10) only. Its owned flag (+0x15) and count (+0x16)
+   * stay 0 as the constructor left them, so the handle doesn't hold the actor: its destructor (1.1.1
+   * main+0x20B6F0) then just sets the id back to -1 and lets go of nothing. */
+  uint8_t *starter = request + z64hd_game->event_req_starter_mtx;
+  memcpy(starter, transform, 12 * sizeof(float));
+  uintptr_t at = actor + z64hd_game->actor_handle_entry;
+  uintptr_t entry = actor && sys_mapped(at, 8, SYS_PERM_R) ? sys_ptr(at) : 0;
+  uint32_t id;
+  if (entry && sys_read32(entry + 0x48, &id)) {
+    memcpy(starter + 0x38 + 0x08, &entry, sizeof(entry));
+    memcpy(starter + 0x38 + 0x10, &id, sizeof(id));
+  }
+  return finish_request(manager, true);
+}
+
 /* --- fallback: swap the destination of the next exit Link takes ---------------------------------- */
 
 static void arm_exit_swap(const warp_map_t *map, const spawn_t *spawn)

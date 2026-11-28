@@ -72,6 +72,13 @@ struct z64hd_build {
   uint32_t vt_hud;
   uint32_t vt_map_screen;
   uint32_t event_mgr_ptr;
+  /* An actor's handle entry (actor handles: [handle+8] the entry, [handle+0x10] the id) is at
+   * actor+actor_handle_entry; the entry holds the actor at +0x40 and the id at +0x48. */
+  uint32_t actor_handle_entry;
+  /* In an event request (warp.c, event_req_ctor): the starter's transform, a row-major 3x4 matrix (identity when made), at
+   * request+event_req_starter_mtx, then the starter's actor handle at request+event_req_starter_mtx+0x38 (+8 the
+   * entry, +0x10 the id, -1 for none). The event places its StarterPos actors from these when it's accepted. */
+  uint32_t event_req_starter_mtx;
   uint32_t event_req_ctor;
   uint32_t event_req_submit;
   uint32_t event_req_sub_dtor;
@@ -253,6 +260,17 @@ struct z64hd_build {
   uint32_t generic_counter_node_vtable;
   /* [main+this]: the pause manager (FINDINGS 9.1: its pause types and their request counts; pausemgr.c) */
   uint32_t pause_mgr_ptr;
+  /* The message window for remote control's dialog state (navstate.c): every UI screen names its layout with a
+   * char * at screen+ui_screen_name ("MessageDialog_00"); in that screen a u32 state at +msgdlg_state (2 typing,
+   * 3 waiting for A, 6 turning the page, 5 choices appearing, 4 a choice, 12 closed), the choice cursor (u8) at
+   * +msgdlg_cursor and the message's id ("EventFlowMsg/<file>:<label>", a char *) at +msgdlg_message. */
+  uint32_t ui_screen_name;
+  uint32_t msgdlg_state;
+  uint32_t msgdlg_cursor;
+  uint32_t msgdlg_message;
+  /* a UI screen's phase: the high u16 of the u32 at screen+ui_screen_phase (0 closed, 1 opening, 2 open; the
+   * item wheel ShortCut_00 takes the stick only at 2) */
+  uint32_t ui_screen_phase;
   struct z64hd_link_path link_paths[5];
 };
 

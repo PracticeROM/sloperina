@@ -83,5 +83,8 @@ bool        gd_game_pausing(void);
 /* A screen of the game's menus is up: the pause screen's pages, the maps, save, game over... (an unnamed Enum,
  * 0x578D41E1, None otherwise). The item wheel pauses the same way but leaves it None. True when unreadable. */
 bool        gd_game_menu_screen(void);
+/* the menu screen that's up ("None", "Loading", "ItemMenu", "GameOver"...), "?" if not one of the 21 known, 0 if
+ * the field can't be read */
+const char *gd_menu_screen_name(void);
 
 #endif
