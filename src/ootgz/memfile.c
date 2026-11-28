@@ -15,6 +15,7 @@
 #include "age.h"
 #include "binds.h"
 #include "cct.h"
+#include "enemyhp.h"
 #include "eventskip.h"
 #include "flagnames.h"
 #include "gamedata.h"
@@ -163,13 +164,26 @@ typedef struct {
 } session_str_t;
 
 #define MEMFILE_ACTORS_MAX   256u
+#define MEMFILE_CUCCOS_MAX   32u
 #define MEMFILE_BB_POOL_MAX  (128u << 10) /* 128 KiB cap for per-actor Blackboard primitive pool per slot */
+#define HELD_NAME_LEN        64u
+#define HELD_BB_MAX          4096u
+#define HELD_FIND_FRAMES     6
+#define HELD_SETTLE_FRAMES   2
+#define HELD_SPAWN_TIMEOUT   120
+#define HELD_REAPPLY_BB      4
+#define HELD_WATCH_FRAMES    120
+#define CUCCO_WATCH_MAX      4
+#define CUCCO_WATCH_FRAMES   240
+#define DROWN_RESTORE_TIMEOUT 40
 #define ACTOR_RESTORE_FRAMES 4
 #define ACTOR_DEAD_RADIUS    30.0f
 #define SAVEPOS_SLOT_BYTES   0x14u /* AutoSaveMgr slot A (+0x198) and slot B (+0x178) */
 #define PLAYER_RESTART_BYTES 0x2Cu /* Player component +0x18A4..+0x18CF restart point & cooldown */
 
 enum { ACTOR_F_LIFE = 1, ACTOR_F_DEAD = 2, ACTOR_F_ENEMY = 4, ACTOR_F_BB = 8 };
+enum { CUCCO_F_HOME = 1, CUCCO_F_DROWN = 2, CUCCO_F_FADE = 4 };
+enum { HELD_F_LIFE = 1, HELD_F_CUCCO = 2 };
 
 typedef struct {
   uint64_t instance_id; /* [[actor + 0x3D8] + 0x88]: Banc PreActor InstanceId */
@@ -183,6 +197,40 @@ typedef struct {
 } memfile_actor_t;
 
 typedef struct {
+  uint64_t instance_id;
+  uint32_t name_hash;
+  uint8_t  flags;              /* CUCCO_F_* */
+  uint8_t  model_fade_active;  /* ModelComponent +0x134 */
+  uint8_t  model_vis_flags;    /* [[comps+0x10]+0xB0] */
+  uint8_t  pad0;
+  uint16_t active_node;        /* Kokko.action.interruptdrown counter node index, or 0xFFFF */
+  uint16_t pad1;
+  float    home_pos[3];        /* QueryActorGetHomePosition fallback when WarpPos is unset */
+  float    counter_val;        /* SelectorGenericFrameCounter +0x20 */
+  float    air_val;            /* CUCCO_JUMP_AIR (119) +0x20 if active, else -1 */
+  int32_t  landing_water_count;/* BSA ctrl blackboard "LandingWaterCount" */
+  float    model_alpha;        /* ModelComponent +0x80 */
+  float    model_fade_step;    /* ModelComponent +0x11C */
+  uint32_t model_fade_flags;   /* ModelComponent +0x128 */
+} memfile_cucco_t;
+
+typedef struct {
+  bool            valid;
+  uint64_t        instance_id; /* 0 if non-Banc / dynamically spawned */
+  uint32_t        name_hash;
+  char            pack_name[HELD_NAME_LEN];
+  float           pos[3];
+  float           rot[9];
+  int32_t         life, max_life;
+  uint8_t         flags;       /* HELD_F_* */
+  uint8_t        *actor_bb;    /* Actor Blackboard [[comps+0]+0x10] primitive snapshot */
+  uint32_t        actor_bb_size;
+  uint8_t        *ai_bb;       /* AIComponent Blackboard primitive snapshot (if present) */
+  uint32_t        ai_bb_size;
+  memfile_cucco_t cucco;       /* valid when flags & HELD_F_CUCCO */
+} memfile_held_t;
+
+typedef struct {
   bool              used;
   uint8_t          *save_buf;
   uint32_t          save_cap, save_size;
@@ -194,6 +242,9 @@ typedef struct {
   uint32_t          actor_count;
   uint8_t          *actor_bb;
   uint32_t          actor_bb_size;
+  memfile_cucco_t  *cuccos;
+  uint32_t          cucco_count;
+  memfile_held_t    held;
   bool              have_actors, actors_truncated;
   char              map[GD_STR_LEN], start[GD_STR_LEN];
   double            x, y, z, fx, fz;
@@ -249,6 +300,7 @@ static enum {
   L_WAIT_SETTLE,
   L_MOVING,
   L_ACTORS,
+  L_HELD,
   L_CAMERA,
 } phase;
 
@@ -432,7 +484,8 @@ static size_t pool_free_bytes(void)
 static bool pool_owns_in_memfile(const memfile_t *m, uint32_t off)
 {
   const void *p = memfile_pool + off + sizeof(pool_hdr_t);
-  return p == m->save_buf || p == m->s_scalars || p == m->s_strs || p == m->actors || p == m->actor_bb;
+  return p == m->save_buf || p == m->s_scalars || p == m->s_strs || p == m->actors || p == m->actor_bb ||
+         p == m->cuccos || p == m->held.actor_bb || p == m->held.ai_bb;
 }
 
 static bool pool_would_fit_reclaiming(size_t n, const memfile_t *reclaim)
@@ -484,6 +537,9 @@ static void free_memfile(memfile_t *st)
   free16(st->s_strs);
   free16(st->actors);
   free16(st->actor_bb);
+  free16(st->cuccos);
+  free16(st->held.actor_bb);
+  free16(st->held.ai_bb);
   *st = (memfile_t){ 0 };
 }
 
@@ -1759,7 +1815,8 @@ static void patch_main_module(void)
 #define BB_TABLE_MAX  256u
 #define BB_STRUCT_LEN 0x5A0u
 
-/* Blackboard typed array headers inside [AIControllerBase + 0x1F8] (same offsets in 1.0.0 and 1.1.1). */
+/* Blackboard typed array headers inside [AIControllerBase + 0x1F8] and Actor Blackboard [[comps + 0] + 0x10]
+ * (same offsets in 1.0.0 and 1.1.1). Each table's names count/ptr sit at count_off - 0x10 and count_off - 0x08. */
 static const struct { uint16_t count_off, ptr_off, elem_size; bool is_float; } bb_tables[BB_TABLES_N] = {
   { 0x0A8, 0x0B0,  4, false }, /* S32 */
   { 0x120, 0x128,  4, true  }, /* F32 */
@@ -1768,7 +1825,7 @@ static const struct { uint16_t count_off, ptr_off, elem_size; bool is_float; } b
   { 0x558, 0x560,  4, false }, /* U32 */
 };
 
-static uintptr_t actor_blackboard(uintptr_t actor)
+static uintptr_t actor_ai_blackboard(uintptr_t actor)
 {
   if (!sys_mapped(actor + 0x270, 8, SYS_PERM_R))
     return 0;
@@ -1797,9 +1854,29 @@ static uintptr_t actor_blackboard(uintptr_t actor)
   return 0;
 }
 
-static bool capture_actor_bb(memfile_t *st, memfile_actor_t *e, uintptr_t actor, uint8_t *pool, uint32_t *pool_at)
+/* Actor Blackboard [[comps + 0x00] + 0x10]: used by BSA-only actors such as Cuccos (WarpPos, LandingPos, HitCount). */
+static uintptr_t actor_own_blackboard(uintptr_t actor)
 {
-  uintptr_t bb = actor_blackboard(actor);
+  if (!sys_mapped(actor + 0x270, 8, SYS_PERM_R))
+    return 0;
+  uintptr_t comps = sys_ptr(actor + 0x270);
+  if (!comps || (comps & 7u) || !sys_mapped(comps, 8, SYS_PERM_R))
+    return 0;
+  uintptr_t bb_comp = sys_ptr(comps);
+  if (!bb_comp || (bb_comp & 7u) || !sys_mapped(bb_comp, 0x18, SYS_PERM_R))
+    return 0;
+  uintptr_t bb = sys_ptr(bb_comp + 0x10);
+  return bb && !(bb & 7u) && sys_mapped(bb, BB_STRUCT_LEN, SYS_PERM_R | SYS_PERM_W) ? bb : 0;
+}
+
+static uintptr_t actor_blackboard(uintptr_t actor)
+{
+  uintptr_t bb = actor_ai_blackboard(actor);
+  return bb ? bb : actor_own_blackboard(actor);
+}
+
+static bool capture_bb_blob(uintptr_t bb, uint8_t *dst, uint32_t cap, uint32_t *len_out)
+{
   if (!bb)
     return false;
   uint16_t counts[BB_TABLES_N] = { 0 };
@@ -1819,34 +1896,26 @@ static bool capture_actor_bb(memfile_t *st, memfile_actor_t *e, uintptr_t actor,
     total += (uint32_t)bytes;
     any = true;
   }
-  if (!any || *pool_at + total > MEMFILE_BB_POOL_MAX)
+  if (!any || total > cap)
     return false;
-  uint32_t start = *pool_at;
-  memcpy(pool + *pool_at, counts, sizeof(counts));
-  *pool_at += (uint32_t)sizeof(counts);
+  uint32_t at = 0;
+  memcpy(dst, counts, sizeof(counts));
+  at += (uint32_t)sizeof(counts);
   for (int t = 0; t < BB_TABLES_N; t++) {
     if (!counts[t])
       continue;
     uint32_t bytes = (uint32_t)counts[t] * bb_tables[t].elem_size;
-    memcpy(pool + *pool_at, (const void *)ptrs[t], bytes);
-    *pool_at += bytes;
+    memcpy(dst + at, (const void *)ptrs[t], bytes);
+    at += bytes;
   }
-  e->bb_off = start;
-  e->bb_len = total;
-  e->flags |= ACTOR_F_BB;
-  (void)st;
+  *len_out = total;
   return true;
 }
 
-static bool restore_actor_bb(const memfile_t *st, const memfile_actor_t *e, uintptr_t actor)
+static bool restore_bb_blob(uintptr_t bb, const uint8_t *src, uint32_t len)
 {
-  if (!(e->flags & ACTOR_F_BB) || !st->actor_bb || e->bb_len < BB_TABLES_N * sizeof(uint16_t) ||
-      e->bb_off > st->actor_bb_size || e->bb_len > st->actor_bb_size - e->bb_off)
+  if (!bb || !src || len < BB_TABLES_N * sizeof(uint16_t))
     return false;
-  uintptr_t bb = actor_blackboard(actor);
-  if (!bb)
-    return false;
-  const uint8_t *src = st->actor_bb + e->bb_off;
   uint16_t counts[BB_TABLES_N];
   memcpy(counts, src, sizeof(counts));
   uint32_t at = (uint32_t)sizeof(counts);
@@ -1855,7 +1924,7 @@ static bool restore_actor_bb(const memfile_t *st, const memfile_actor_t *e, uint
     uint32_t bytes = (uint32_t)counts[t] * bb_tables[t].elem_size;
     if (!counts[t])
       continue;
-    if (at + bytes > e->bb_len)
+    if (at + bytes > len)
       break;
     uint32_t live_cnt = 0;
     if (sys_read32(bb + bb_tables[t].count_off, &live_cnt) && live_cnt == counts[t]) {
@@ -1882,6 +1951,93 @@ static bool restore_actor_bb(const memfile_t *st, const memfile_actor_t *e, uint
   return wrote;
 }
 
+static bool bb_find_named(uintptr_t bb, int table_idx, const char *name, uintptr_t *val_addr, bool write)
+{
+  if (!bb || table_idx < 0 || table_idx >= BB_TABLES_N || !name || !name[0])
+    return false;
+  uint16_t cnt_off = bb_tables[table_idx].count_off;
+  uint16_t ptr_off = bb_tables[table_idx].ptr_off;
+  uint16_t esz = bb_tables[table_idx].elem_size;
+  uint32_t n_names = 0, n_vals = 0;
+  if (!sys_read32(bb + cnt_off - 0x10u, &n_names) || !sys_read32(bb + cnt_off, &n_vals) ||
+      !n_names || n_names > BB_TABLE_MAX || n_vals < n_names)
+    return false;
+  uintptr_t names = sys_ptr(bb + cnt_off - 0x08u);
+  uintptr_t vals = sys_ptr(bb + ptr_off);
+  uint32_t perm = write ? (SYS_PERM_R | SYS_PERM_W) : SYS_PERM_R;
+  if (!names || (names & 7u) || !vals || !sys_mapped(names, (size_t)n_names * 8u, SYS_PERM_R) ||
+      !sys_mapped(vals, (size_t)n_names * esz, perm))
+    return false;
+  size_t len = strlen(name) + 1u;
+  for (uint32_t i = 0; i < n_names; i++) {
+    uintptr_t s = sys_ptr(names + (size_t)i * 8u);
+    if (s && sys_mapped(s, len, SYS_PERM_R) && bytes_equal((const void *)s, name, len)) {
+      *val_addr = vals + (size_t)i * esz;
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool bb_read_s32(uintptr_t bb, const char *name, int32_t *out)
+{
+  uintptr_t p = 0;
+  if (!bb_find_named(bb, 0, name, &p, false))
+    return false;
+  memcpy(out, (const void *)p, 4);
+  return true;
+}
+
+static bool bb_write_s32(uintptr_t bb, const char *name, int32_t val)
+{
+  uintptr_t p = 0;
+  if (!bb_find_named(bb, 0, name, &p, true))
+    return false;
+  memcpy((void *)p, &val, 4);
+  return true;
+}
+
+static bool bb_read_bool(uintptr_t bb, const char *name, uint8_t *out)
+{
+  uintptr_t p = 0;
+  if (!bb_find_named(bb, 2, name, &p, false))
+    return false;
+  *out = *(const uint8_t *)p ? 1u : 0u;
+  return true;
+}
+
+static bool bb_write_bool(uintptr_t bb, const char *name, uint8_t val)
+{
+  uintptr_t p = 0;
+  if (!bb_find_named(bb, 2, name, &p, true))
+    return false;
+  *(volatile uint8_t *)p = val ? 1u : 0u;
+  return true;
+}
+
+static bool capture_actor_bb(memfile_t *st, memfile_actor_t *e, uintptr_t actor, uint8_t *pool, uint32_t *pool_at)
+{
+  uintptr_t bb = actor_blackboard(actor);
+  uint32_t got = 0;
+  if (!bb || *pool_at >= MEMFILE_BB_POOL_MAX ||
+      !capture_bb_blob(bb, pool + *pool_at, MEMFILE_BB_POOL_MAX - *pool_at, &got))
+    return false;
+  e->bb_off = *pool_at;
+  e->bb_len = got;
+  *pool_at += got;
+  e->flags |= ACTOR_F_BB;
+  (void)st;
+  return true;
+}
+
+static bool restore_actor_bb(const memfile_t *st, const memfile_actor_t *e, uintptr_t actor)
+{
+  if (!(e->flags & ACTOR_F_BB) || !st->actor_bb || e->bb_len < BB_TABLES_N * sizeof(uint16_t) ||
+      e->bb_off > st->actor_bb_size || e->bb_len > st->actor_bb_size - e->bb_off)
+    return false;
+  return restore_bb_blob(actor_blackboard(actor), st->actor_bb + e->bb_off, e->bb_len);
+}
+
 /* --- scene actors: transform, HP, Blackboard and dead/alive state (1.0.0 & 1.1.1) -------------- */
 
 #define AMGR_TREE_ROOT       0x38u
@@ -1899,18 +2055,58 @@ static bool restore_actor_bb(const memfile_t *st, const memfile_actor_t *e, uint
 #define A_FORCE_POS          0x358u
 #define A_PREACTOR           0x3D8u
 #define A_FLAGS              0x4A8u
+#define A_HOME_POS           0x2ECu
+#define A_HOME_FLAGS         0x519u
 #define PREACTOR_INSTANCE_ID 0x88u
+#define ACOMP_VIS            0x10u
 #define ACOMP_PHYSICS        0x50u
+#define ACOMP_BSA            0x188u
+#define ACOMP_MODEL          0x260u
 #define ACOMP_LIFE           0x2B8u
+#define ACOMP_LIFTABLE       0x2C0u
+#define ACOMP_LIFTER         0x2C8u
 #define ALIFE_CUR            0x1C10u
 #define ALIFE_MAX            0x1C18u
 #define APARAM_VAL           0x08u
+#define LIFTER_TARGET_LINK   0x1B0u /* inner ActorLink inside lifter+0x1A8 holder (entry +0x1B8, gen +0x1C0) */
+#define LIFTER_STATE         0x2B0u
+#define PLAYER_LIFT_FLAGS    0xE40u
+#define BSA_CUR_VERB         0x54u
+#define BSA_ACTION_HOLDER    0x1B0u
+#define BSA_ACTION_SLOTS     0x1C0u
+#define BSA_SLOT_FLAGS       0x7Cu
+#define ACTION_VERB_LIFT     0x2Bu /* Lift (weapon/sub slot 1 -> Player.sub.action.lift / ExecutePlayerLift) */
+#define ACTION_VERB_DROWN    0x9Du /* InterruptDrown (main slot 0) */
+#define MODEL_ALPHA          0x80u
+#define MODEL_ALPHA_PREV     0x84u
+#define MODEL_FADE_STEP      0x11Cu
+#define MODEL_DIRTY_FLAGS    0x120u
+#define MODEL_FADE_FLAGS     0x128u
+#define MODEL_FADE_ACTIVE    0x134u
+#define VIS_FADE_FLAGS       0xB0u
 #define ATREE_MAX_DEPTH      64
 #define ATREE_MAX_VISITS     4096
+
+/* Kokko.action.interruptdrown.module SelectorGenericFrameCounter node indices (FINDINGS 9.47). */
+enum {
+  CUCCO_NODE_IN_WATER = 35,
+  CUCCO_NODE_LOOK     = 125,
+  CUCCO_NODE_JUMP     = 77,
+  CUCCO_NODE_JUMP_AIR = 119,
+  CUCCO_NODE_SINK     = 14,
+  CUCCO_NODE_FADE_IN  = 18,
+  CUCCO_NODE_LAND     = 31,
+};
 
 typedef bool (*actor_force_pos_t)(uintptr_t physics_comp, const float pos[3], const float rot[9], bool immediate);
 typedef void (*actor_req_del_t)(uintptr_t actor, uint32_t reason);
 typedef void (*preactor_update_t)(void *node);
+typedef void (*actor_link_set_t)(void *link, uintptr_t actor, uint16_t flags);
+typedef void (*actor_link_dtor_t)(void *link);
+typedef bool (*lifter_drop_t)(uintptr_t lifter, int reason, float s0, float s1);
+typedef bool (*lifter_force_lift_t)(uintptr_t lifter, void *link, const char *const *key, bool flag);
+typedef void (*player_lift_anim_t)(uintptr_t link_actor, void *link);
+typedef int  (*bsa_set_verb_t)(uintptr_t bsa, const void *req, bool flag);
 
 /* Call SeqExecuteUpdatePreActorFlag's update with all five inputs true: resyncs GameData-backed dead flags from
  * the restored GameData, clears in-memory PreActor dead flags (so defeated enemies like Beamos respawn on fast
@@ -2012,6 +2208,687 @@ static uintptr_t actor_physics_comp(uintptr_t actor)
   return phys && !(phys & 7u) && sys_mapped(phys, 0x40, SYS_PERM_R) ? phys : 0;
 }
 
+/* --- Cucco drown / fade / respawn state & BSA verb helper (1.0.0 & 1.1.1) ---------------------- */
+
+static bool is_cucco_name(const char *name)
+{
+  return name && (starts_with(name, "Animal_Cucco") || starts_with(name, "Animal_SuperCucco"));
+}
+
+static bool starts_ci(const char *s, const char *w)
+{
+  for (; *w; s++, w++) {
+    char a = *s >= 'A' && *s <= 'Z' ? (char)(*s + 32) : *s;
+    char b = *w >= 'A' && *w <= 'Z' ? (char)(*w + 32) : *w;
+    if (a != b)
+      return false;
+  }
+  return true;
+}
+
+static uintptr_t actor_home_pos_addr(uintptr_t actor, bool write)
+{
+  uint32_t perm = write ? (SYS_PERM_R | SYS_PERM_W) : SYS_PERM_R;
+  if (!sys_mapped(actor + A_HOME_POS, 12, perm) || !sys_mapped(actor + A_HOME_FLAGS, 1, SYS_PERM_R))
+    return 0;
+  uintptr_t at = actor + A_HOME_POS;
+  if (*(const uint8_t *)(actor + A_HOME_FLAGS) & 2u) {
+    uintptr_t phys = actor_physics_comp(actor);
+    uintptr_t a = phys && sys_mapped(phys + 0x20, 8, SYS_PERM_R) ? sys_ptr(phys + 0x20) : 0;
+    uintptr_t b = a && !(a & 7u) && sys_mapped(a + 0x180, 8, SYS_PERM_R) ? sys_ptr(a + 0x180) : 0;
+    if (b && !(b & 7u) && sys_mapped(b + 0x10, 12, perm))
+      at = b + 0x10;
+  }
+  return at;
+}
+
+static bool read_home_pos(uintptr_t actor, float out[3])
+{
+  uintptr_t at = actor_home_pos_addr(actor, false);
+  if (!at)
+    return false;
+  memcpy(out, (const void *)at, 12);
+  return finite_vec3(out);
+}
+
+static bool write_home_pos(uintptr_t actor, const float in[3])
+{
+  if (!finite_vec3(in))
+    return false;
+  uintptr_t at = actor_home_pos_addr(actor, true);
+  if (!at)
+    return false;
+  memcpy((void *)at, in, 12);
+  return true;
+}
+
+static uintptr_t actor_bsa_comp(uintptr_t actor)
+{
+  if (!sys_mapped(actor + A_COMPONENTS, 8, SYS_PERM_R))
+    return 0;
+  uintptr_t comps = sys_ptr(actor + A_COMPONENTS);
+  if (!comps || (comps & 7u) || !sys_mapped(comps + ACOMP_BSA, 8, SYS_PERM_R))
+    return 0;
+  uintptr_t bsa = sys_ptr(comps + ACOMP_BSA);
+  return bsa && !(bsa & 7u) && sys_mapped(bsa, 0x200, SYS_PERM_R) ? bsa : 0;
+}
+
+/* Send a 0x60-byte BSAComponent::setActionVerb request (FINDINGS 9.22). Returns 0 on success (3 = slot busy). */
+static int bsa_request_verb(uintptr_t bsa, uint32_t verb, uint32_t slot, uint16_t flags)
+{
+  if (!bsa || !z64hd_game || !z64hd_game->bsa_set_action_verb)
+    return -1;
+  /* Clear slot->flags bit 1 ("already requested this frame") so a request sent after the scheduler ran isn't dropped. */
+  if (slot <= 4u && sys_mapped(bsa + BSA_ACTION_SLOTS + (size_t)slot * 8u, 8, SYS_PERM_R)) {
+    uintptr_t slot_obj = sys_ptr(bsa + BSA_ACTION_SLOTS + (size_t)slot * 8u);
+    if (slot_obj && !(slot_obj & 7u) && sys_mapped(slot_obj + BSA_SLOT_FLAGS, 1, SYS_PERM_R | SYS_PERM_W))
+      *(volatile uint8_t *)(slot_obj + BSA_SLOT_FLAGS) &= (uint8_t)~2u;
+  }
+  uint8_t req[0x60];
+  memset(req, 0, sizeof(req));
+  uint32_t qnan = 0x7FC00000u, four = 4u, c11a = 0x11Au, c10 = 0x10u;
+  memcpy(req + 0x00, &qnan, 4);
+  memcpy(req + 0x0C, &qnan, 4);
+  memcpy(req + 0x18, &qnan, 4);
+  memcpy(req + 0x24, &four, 4);
+  memcpy(req + 0x28, &c11a, 4);
+  memcpy(req + 0x2C, &qnan, 4);
+  memcpy(req + 0x30, &qnan, 4);
+  memcpy(req + 0x34, &c10, 4);
+  memcpy(req + 0x48, &slot, 4);
+  memcpy(req + 0x4C, &verb, 4);
+  memcpy(req + 0x50, &flags, 2);
+  return MAIN_FN(bsa_set_verb_t, z64hd_game->bsa_set_action_verb)(bsa, req, true);
+}
+
+static uintptr_t cucco_drown_unit(uintptr_t actor, uintptr_t *ctrl_out)
+{
+  if (ctrl_out)
+    *ctrl_out = 0;
+  uintptr_t bsa = actor_bsa_comp(actor);
+  if (!bsa)
+    return 0;
+  uintptr_t holder = sys_ptr(bsa + BSA_ACTION_HOLDER);
+  uintptr_t ctrl = holder && !(holder & 7u) && sys_mapped(holder, 0x88, SYS_PERM_R) ? sys_ptr(holder + 0x80) : 0;
+  if (!ctrl || (ctrl & 7u) || !sys_mapped(ctrl, 0x200, SYS_PERM_R) || sys_ptr(ctrl + 0x1F0) != actor)
+    return 0;
+  uint32_t n_defs = 0;
+  if (!sys_read32(ctrl + 0x168, &n_defs) || !n_defs || n_defs > 0x15Eu)
+    return 0;
+  uintptr_t defs = sys_ptr(ctrl + 0x170);
+  if (!defs || (defs & 7u) || !sys_mapped(defs, (size_t)n_defs * 8u, SYS_PERM_R))
+    return 0;
+  uintptr_t def = 0;
+  for (uint32_t i = 0; i < n_defs; i++) {
+    uintptr_t d = sys_ptr(defs + (size_t)i * 8u);
+    uintptr_t file = d && !(d & 7u) && sys_mapped(d, 0x18, SYS_PERM_R) ? sys_ptr(d + 0x10) : 0;
+    if (!file || !sys_mapped(file, 0x80, SYS_PERM_R) || !bytes_equal((const void *)file, "AIB ", 4))
+      continue;
+    uint32_t pool = *(const uint32_t *)(file + 0x24);
+    if (pool < 0x80u || pool > 0x1000000u || !sys_mapped(file + pool, 40, SYS_PERM_R))
+      continue;
+    if (starts_ci((const char *)(file + pool), "Kokko.action.interruptdrown.module")) {
+      def = d;
+      break;
+    }
+  }
+  if (!def)
+    return 0;
+  uint32_t n_units = 0;
+  if (!sys_read32(ctrl + 0x18, &n_units) || !n_units || n_units > 64u)
+    return 0;
+  uintptr_t units = sys_ptr(ctrl + 0x20);
+  if (!units || (units & 7u) || !sys_mapped(units, (size_t)n_units * 0x18u, SYS_PERM_R))
+    return 0;
+  for (uint32_t j = 0; j < n_units; j++) {
+    uintptr_t unit = sys_ptr(units + (size_t)j * 0x18u);
+    if (unit && !(unit & 7u) && sys_mapped(unit, 0x90, SYS_PERM_R) && sys_ptr(unit + 0x10) == def) {
+      if (ctrl_out)
+        *ctrl_out = ctrl;
+      return unit;
+    }
+  }
+  return 0;
+}
+
+static uintptr_t unit_counter_node(uintptr_t unit, uint16_t idx)
+{
+  if (!unit || !z64hd_game || !z64hd_game->frame_counter_node_vtable)
+    return 0;
+  uint64_t vt = MAIN(z64hd_game->frame_counter_node_vtable);
+  uint32_t n_nodes = 0;
+  if (sys_read32(unit + 0x60, &n_nodes) && idx < n_nodes && n_nodes <= 512u) {
+    uintptr_t arr = sys_ptr(unit + 0x68);
+    if (arr && !(arr & 7u) && sys_mapped(arr + (size_t)idx * 8u, 8, SYS_PERM_R)) {
+      uintptr_t node = sys_ptr(arr + (size_t)idx * 8u);
+      if (node && !(node & 7u) && sys_mapped(node, 0x60, SYS_PERM_R | SYS_PERM_W) &&
+          sys_ptr(node) == vt && sys_ptr(node + 8) == unit && *(const uint16_t *)(node + 0x1C) == idx)
+        return node;
+    }
+  }
+  /* Fallback scan immediately after the unit (as drownview.c does). */
+  size_t span = 0x8000u;
+  while (span >= 0x1000u && !sys_mapped(unit, span, SYS_PERM_R))
+    span /= 2u;
+  if (span < 0x1000u)
+    return 0;
+  for (const uint64_t *w = (const uint64_t *)unit; (uintptr_t)w < unit + span; w++) {
+    if (*w != vt)
+      continue;
+    uintptr_t node = (uintptr_t)w;
+    if (sys_mapped(node, 0x60, SYS_PERM_R | SYS_PERM_W) && sys_ptr(node + 8) == unit &&
+        *(const uint16_t *)(node + 0x1C) == idx)
+      return node;
+  }
+  return 0;
+}
+
+static bool unit_node_counting(uintptr_t unit, uintptr_t node, uint16_t idx)
+{
+  if (!unit || !node || !sys_mapped(node, 0x60, SYS_PERM_R))
+    return false;
+  uint32_t bits = 0;
+  if (sys_read32(unit + 0x80, &bits) && idx < bits && bits <= 512u) {
+    uintptr_t bmp = sys_ptr(unit + 0x88);
+    if (bmp && !(bmp & 3u) && sys_mapped(bmp + ((size_t)(idx >> 5) * 4u), 4, SYS_PERM_R)) {
+      uint32_t word = 0;
+      memcpy(&word, (const void *)(bmp + ((size_t)(idx >> 5) * 4u)), 4);
+      if (!(word & (1u << (idx & 31u))))
+        return false;
+    }
+  }
+  uint32_t nflags = *(const uint32_t *)(node + 0x18);
+  if (!(nflags & 2u))
+    return false;
+  return *(const uint8_t *)(node + 0x1E) == *(const uint8_t *)(node + 0x58);
+}
+
+static uintptr_t actor_model_comp(uintptr_t actor, bool write)
+{
+  if (!sys_mapped(actor + A_COMPONENTS, 8, SYS_PERM_R))
+    return 0;
+  uintptr_t comps = sys_ptr(actor + A_COMPONENTS);
+  if (!comps || (comps & 7u) || !sys_mapped(comps + ACOMP_MODEL, 8, SYS_PERM_R))
+    return 0;
+  uintptr_t model = sys_ptr(comps + ACOMP_MODEL);
+  uint32_t perm = write ? (SYS_PERM_R | SYS_PERM_W) : SYS_PERM_R;
+  return model && !(model & 7u) && sys_mapped(model, 0x140, perm) ? model : 0;
+}
+
+static uintptr_t actor_vis_flags_addr(uintptr_t actor, bool write)
+{
+  if (!sys_mapped(actor + A_COMPONENTS, 8, SYS_PERM_R))
+    return 0;
+  uintptr_t comps = sys_ptr(actor + A_COMPONENTS);
+  if (!comps || (comps & 7u) || !sys_mapped(comps + ACOMP_VIS, 8, SYS_PERM_R))
+    return 0;
+  uintptr_t vis = sys_ptr(comps + ACOMP_VIS);
+  uint32_t perm = write ? (SYS_PERM_R | SYS_PERM_W) : SYS_PERM_R;
+  return vis && !(vis & 7u) && sys_mapped(vis + VIS_FADE_FLAGS, 1, perm) ? vis + VIS_FADE_FLAGS : 0;
+}
+
+static void capture_model_fade(uintptr_t actor, memfile_cucco_t *c)
+{
+  uintptr_t model = actor_model_comp(actor, false);
+  if (!model)
+    return;
+  float alpha = 1.0f, step = 0.0f;
+  uint32_t fflags = 0;
+  memcpy(&alpha, (const void *)(model + MODEL_ALPHA), 4);
+  memcpy(&step, (const void *)(model + MODEL_FADE_STEP), 4);
+  memcpy(&fflags, (const void *)(model + MODEL_FADE_FLAGS), 4);
+  uint8_t active = *(const uint8_t *)(model + MODEL_FADE_ACTIVE);
+  uintptr_t vis_p = actor_vis_flags_addr(actor, false);
+  uint8_t vflags = vis_p ? *(const uint8_t *)vis_p : 0;
+  if (!(alpha >= 0.0f && alpha <= 1.0f))
+    return;
+  if (alpha < 0.999f || (fflags & 0x0Cu) || active || (vflags & 0x34u)) {
+    c->flags |= CUCCO_F_FADE;
+    c->model_alpha = alpha;
+    c->model_fade_step = (step > 0.0f && step <= 1.0f) ? step : (1.0f / 6.0f);
+    c->model_fade_flags = fflags;
+    c->model_fade_active = active;
+    c->model_vis_flags = vflags;
+  }
+}
+
+static void restore_model_fade(uintptr_t actor, const memfile_cucco_t *c)
+{
+  if (!(c->flags & CUCCO_F_FADE))
+    return;
+  uintptr_t model = actor_model_comp(actor, true);
+  if (!model)
+    return;
+  float alpha = c->model_alpha;
+  if (!(alpha >= 0.0f && alpha <= 1.0f))
+    return;
+  float step = (c->model_fade_step > 0.0f && c->model_fade_step <= 1.0f) ? c->model_fade_step : (1.0f / 6.0f);
+  memcpy((void *)(model + MODEL_ALPHA), &alpha, 4);
+  memcpy((void *)(model + MODEL_ALPHA_PREV), &alpha, 4);
+  memcpy((void *)(model + MODEL_FADE_STEP), &step, 4);
+  uint32_t fflags = 0, dflags = 0;
+  memcpy(&fflags, (const void *)(model + MODEL_FADE_FLAGS), 4);
+  fflags = (fflags & ~0x40CCu) | (c->model_fade_flags & 0x40CCu);
+  memcpy((void *)(model + MODEL_FADE_FLAGS), &fflags, 4);
+  memcpy(&dflags, (const void *)(model + MODEL_DIRTY_FLAGS), 4);
+  dflags |= 0x2500u;
+  memcpy((void *)(model + MODEL_DIRTY_FLAGS), &dflags, 4);
+  *(volatile uint8_t *)(model + MODEL_FADE_ACTIVE) = c->model_fade_active;
+  uintptr_t vis_p = actor_vis_flags_addr(actor, true);
+  if (vis_p) {
+    uint8_t cur = *(const uint8_t *)vis_p;
+    *(volatile uint8_t *)vis_p = (uint8_t)((cur & ~0x34u) | (c->model_vis_flags & 0x34u));
+  }
+}
+
+static bool capture_cucco_state(uintptr_t actor, uint64_t instance_id, uint32_t name_hash, memfile_cucco_t *out)
+{
+  *out = (memfile_cucco_t){ 0 };
+  out->instance_id = instance_id;
+  out->name_hash = name_hash;
+  out->active_node = 0xFFFFu;
+  out->air_val = -1.0f;
+  if (read_home_pos(actor, out->home_pos))
+    out->flags |= CUCCO_F_HOME;
+  capture_model_fade(actor, out);
+
+  uintptr_t ctrl = 0;
+  uintptr_t unit = cucco_drown_unit(actor, &ctrl);
+  if (unit && ctrl) {
+    static const uint16_t order[] = {
+      CUCCO_NODE_SINK, CUCCO_NODE_FADE_IN, CUCCO_NODE_LAND,
+      CUCCO_NODE_JUMP, CUCCO_NODE_LOOK, CUCCO_NODE_IN_WATER,
+    };
+    uintptr_t bsa = actor_bsa_comp(actor);
+    uint32_t cur_verb = 0;
+    bool in_drown = bsa && sys_read32(bsa + BSA_CUR_VERB, &cur_verb) && cur_verb == ACTION_VERB_DROWN;
+    for (size_t i = 0; i < sizeof(order) / sizeof(order[0]); i++) {
+      uintptr_t n = unit_counter_node(unit, order[i]);
+      if (n && unit_node_counting(unit, n, order[i])) {
+        float val = 0;
+        memcpy(&val, (const void *)(n + 0x20), 4);
+        if (val == val && val >= 0.0f && val < 10000.0f) {
+          out->active_node = order[i];
+          out->counter_val = val;
+          out->flags |= CUCCO_F_DROWN;
+          break;
+        }
+      }
+    }
+    if (in_drown && !(out->flags & CUCCO_F_DROWN))
+      out->flags |= CUCCO_F_DROWN;
+    if (out->active_node == CUCCO_NODE_JUMP) {
+      uintptr_t air = unit_counter_node(unit, CUCCO_NODE_JUMP_AIR);
+      if (air && unit_node_counting(unit, air, CUCCO_NODE_JUMP_AIR)) {
+        float aval = 0;
+        memcpy(&aval, (const void *)(air + 0x20), 4);
+        if (aval == aval && aval >= 0.0f && aval < 1000.0f)
+          out->air_val = aval;
+      }
+    }
+    uintptr_t ctrl_bb = sys_ptr(ctrl + 0x1F8);
+    if (ctrl_bb && !(ctrl_bb & 7u) && sys_mapped(ctrl_bb, BB_STRUCT_LEN, SYS_PERM_R)) {
+      int32_t lwc = 0;
+      if (bb_read_s32(ctrl_bb, "LandingWaterCount", &lwc))
+        out->landing_water_count = lwc;
+    }
+  }
+  if (out->flags & (CUCCO_F_DROWN | CUCCO_F_FADE))
+    log_printf("memfile save: cucco id=%#lx flags=%#x node=%u ctr=%.1f lwc=%d alpha=%.2f fflags=%#x fact=%u vflags=%#x", /* not menu text */
+               (unsigned long)instance_id, (unsigned)out->flags, (unsigned)out->active_node, (double)out->counter_val,
+               (int)out->landing_water_count, (double)out->model_alpha, (unsigned)out->model_fade_flags,
+               (unsigned)out->model_fade_active, (unsigned)out->model_vis_flags);
+  return out->flags != 0;
+}
+
+/* Post-load asynchronous restore jobs: Cucco drown/fade/respawn timer fast-forward + held Actor BB re-apply. */
+#define DROWN_JOBS_MAX 8
+
+typedef struct {
+  bool            active;
+  uintptr_t       actor;
+  memfile_cucco_t cucco;
+  int             frames;
+  bool            lwc_set;
+} drown_job_t;
+
+typedef struct {
+  bool      active;
+  uintptr_t actor;
+  int       frames;
+  uint32_t  last_state;
+  uint32_t  last_verb;
+  uint8_t   last_force_ret;
+  bool      logged_fade;
+  float     last_pos[3];
+} cucco_watch_t;
+
+static drown_job_t   drown_jobs[DROWN_JOBS_MAX];
+static cucco_watch_t cucco_watches[CUCCO_WATCH_MAX];
+static uintptr_t     held_reapply_actor;
+static int           held_reapply_frames;
+static int           held_reapply_slot;
+static uintptr_t     held_watch_actor;
+static int           held_watch_frames;
+static uint32_t      held_watch_lstate;
+static uint32_t      held_watch_astate;
+static uint32_t      held_watch_verb;
+static uintptr_t     held_spawn_handle;
+static uintptr_t     held_target_actor;
+static int           held_settle_frames;
+static bool          held_spawn_tried;
+
+static void clear_post_load_jobs(void)
+{
+  memset(drown_jobs, 0, sizeof(drown_jobs));
+  memset(cucco_watches, 0, sizeof(cucco_watches));
+  held_reapply_actor = 0;
+  held_reapply_frames = 0;
+  held_watch_actor = 0;
+  held_watch_frames = 0;
+  held_target_actor = 0;
+  held_settle_frames = 0;
+  held_spawn_tried = false;
+  if (held_spawn_handle)
+    actor_spawn_cancel(&held_spawn_handle);
+}
+
+static float actor_model_alpha(uintptr_t actor)
+{
+  uintptr_t model = actor_model_comp(actor, false);
+  if (!model)
+    return 1.0f;
+  float a = 1.0f;
+  memcpy(&a, (const void *)(model + MODEL_ALPHA), 4);
+  return a;
+}
+
+static uint32_t actor_cur_verb(uintptr_t actor)
+{
+  uintptr_t bsa = actor_bsa_comp(actor);
+  uint32_t v = 0;
+  return bsa && sys_read32(bsa + BSA_CUR_VERB, &v) ? v : 0u;
+}
+
+static void watch_nearby_cucco(uintptr_t actor, const memfile_t *st)
+{
+  if (!actor || !st || !st->have_pos || !sys_mapped(actor + A_POS, 12, SYS_PERM_R))
+    return;
+  float p[3];
+  memcpy(p, (const void *)(actor + A_POS), 12);
+  float dx = p[0] - (float)st->x, dy = p[1] - (float)st->y, dz = p[2] - (float)st->z;
+  if (dx * dx + dy * dy + dz * dz > 15.0f * 15.0f)
+    return;
+  for (int i = 0; i < CUCCO_WATCH_MAX; i++)
+    if (cucco_watches[i].active && cucco_watches[i].actor == actor)
+      return;
+  for (int i = 0; i < CUCCO_WATCH_MAX; i++) {
+    if (!cucco_watches[i].active) {
+      uint32_t astate = *(const uint32_t *)(actor + A_STATE);
+      uint32_t verb = actor_cur_verb(actor);
+      uint8_t fr = 0;
+      bb_read_bool(actor_own_blackboard(actor), "DoForceReturnHome", &fr);
+      float alpha = actor_model_alpha(actor);
+      cucco_watches[i] = (cucco_watch_t){
+        .active = true,
+        .actor = actor,
+        .frames = 0,
+        .last_state = astate,
+        .last_verb = verb,
+        .last_force_ret = fr,
+        .logged_fade = alpha < 0.95f,
+        .last_pos = { p[0], p[1], p[2] },
+      };
+      log_printf("memfiles: watch cucco %#lx pos=%.1f,%.1f,%.1f state=%u verb=%#x alpha=%.2f force_ret=%u", /* not menu text */
+                 (unsigned long)actor, (double)p[0], (double)p[1], (double)p[2], (unsigned)astate, (unsigned)verb,
+                 (double)alpha, (unsigned)fr);
+      return;
+    }
+  }
+}
+
+static void queue_drown_job(uintptr_t actor, const memfile_cucco_t *c)
+{
+  if (!actor || !c || !(c->flags & CUCCO_F_DROWN))
+    return;
+  for (int i = 0; i < DROWN_JOBS_MAX; i++)
+    if (drown_jobs[i].active && drown_jobs[i].actor == actor)
+      return;
+  for (int i = 0; i < DROWN_JOBS_MAX; i++) {
+    if (!drown_jobs[i].active) {
+      drown_jobs[i] = (drown_job_t){ .active = true, .actor = actor, .cucco = *c, .frames = 0, .lwc_set = false };
+      uintptr_t bsa = actor_bsa_comp(actor);
+      uint32_t cur_verb = 0;
+      if (bsa && (!sys_read32(bsa + BSA_CUR_VERB, &cur_verb) || cur_verb != ACTION_VERB_DROWN))
+        bsa_request_verb(bsa, ACTION_VERB_DROWN, 0, 0x101u);
+      return;
+    }
+  }
+}
+
+static void set_counter_elapsed(uintptr_t node, float val)
+{
+  if (!node || !sys_mapped(node + 0x20, 4, SYS_PERM_R | SYS_PERM_W))
+    return;
+  memcpy((void *)(node + 0x20), &val, 4);
+}
+
+static void step_drown_job(drown_job_t *j)
+{
+  j->frames++;
+  if (j->frames > DROWN_RESTORE_TIMEOUT || !sys_mapped(j->actor, A_PREACTOR + 8, SYS_PERM_R)) {
+    j->active = false;
+    return;
+  }
+  uint32_t state = *(const uint32_t *)(j->actor + A_STATE);
+  if (state >= 7u) {
+    j->active = false;
+    return;
+  }
+  uintptr_t ctrl = 0;
+  uintptr_t unit = cucco_drown_unit(j->actor, &ctrl);
+  if (!unit || !ctrl)
+    return;
+  uintptr_t bsa = actor_bsa_comp(j->actor);
+  uint32_t cur_verb = 0;
+  bool in_drown = bsa && sys_read32(bsa + BSA_CUR_VERB, &cur_verb) && cur_verb == ACTION_VERB_DROWN;
+  if (!in_drown) {
+    if (j->frames <= 12)
+      bsa_request_verb(bsa, ACTION_VERB_DROWN, 0, 0x101u);
+    return;
+  }
+
+  uintptr_t ctrl_bb = sys_ptr(ctrl + 0x1F8);
+  bool have_ctrl_bb = ctrl_bb && !(ctrl_bb & 7u) && sys_mapped(ctrl_bb, BB_STRUCT_LEN, SYS_PERM_R | SYS_PERM_W);
+  uint16_t want = j->cucco.active_node;
+  if (want == 0xFFFFu) {
+    restore_model_fade(j->actor, &j->cucco);
+    j->active = false;
+    return;
+  }
+
+  /* Fast-forward through earlier stages cleanly using the engine's own transitions. */
+  uintptr_t n35 = unit_counter_node(unit, CUCCO_NODE_IN_WATER);
+  uintptr_t n125 = unit_counter_node(unit, CUCCO_NODE_LOOK);
+  uintptr_t n77 = unit_counter_node(unit, CUCCO_NODE_JUMP);
+  uintptr_t n14 = unit_counter_node(unit, CUCCO_NODE_SINK);
+  uintptr_t n18 = unit_counter_node(unit, CUCCO_NODE_FADE_IN);
+  uintptr_t n31 = unit_counter_node(unit, CUCCO_NODE_LAND);
+
+  if (want == CUCCO_NODE_IN_WATER) {
+    if (n35 && unit_node_counting(unit, n35, CUCCO_NODE_IN_WATER)) {
+      set_counter_elapsed(n35, j->cucco.counter_val);
+      j->active = false;
+    }
+    return;
+  }
+  if (want == CUCCO_NODE_LOOK) {
+    if (n35 && unit_node_counting(unit, n35, CUCCO_NODE_IN_WATER))
+      set_counter_elapsed(n35, 30.0f);
+    if (n125 && unit_node_counting(unit, n125, CUCCO_NODE_LOOK)) {
+      set_counter_elapsed(n125, j->cucco.counter_val);
+      j->active = false;
+    }
+    return;
+  }
+  if (want == CUCCO_NODE_JUMP) {
+    if (n35 && unit_node_counting(unit, n35, CUCCO_NODE_IN_WATER))
+      set_counter_elapsed(n35, 30.0f);
+    if (n125 && unit_node_counting(unit, n125, CUCCO_NODE_LOOK)) {
+      if (have_ctrl_bb && !j->lwc_set) {
+        bb_write_s32(ctrl_bb, "LandingWaterCount", j->cucco.landing_water_count);
+        j->lwc_set = true;
+      }
+      set_counter_elapsed(n125, 120.0f);
+    }
+    if (n77 && unit_node_counting(unit, n77, CUCCO_NODE_JUMP)) {
+      if (have_ctrl_bb && !j->lwc_set) {
+        bb_write_s32(ctrl_bb, "LandingWaterCount", j->cucco.landing_water_count);
+        j->lwc_set = true;
+      }
+      set_counter_elapsed(n77, j->cucco.counter_val);
+      if (j->cucco.air_val >= 0.0f) {
+        uintptr_t n119 = unit_counter_node(unit, CUCCO_NODE_JUMP_AIR);
+        if (n119 && unit_node_counting(unit, n119, CUCCO_NODE_JUMP_AIR))
+          set_counter_elapsed(n119, j->cucco.air_val);
+      }
+      j->active = false;
+    }
+    return;
+  }
+
+  /* SINK (14), FADE_IN (18), or LAND (31): skip jump loop via IsForceWarp / LandingWaterCount=4. */
+  if (have_ctrl_bb) {
+    bb_write_bool(ctrl_bb, "IsForceWarp", 1);
+    bb_write_s32(ctrl_bb, "LandingWaterCount", 4);
+  }
+  if (n35 && unit_node_counting(unit, n35, CUCCO_NODE_IN_WATER))
+    set_counter_elapsed(n35, 30.0f);
+  if (n125 && unit_node_counting(unit, n125, CUCCO_NODE_LOOK))
+    set_counter_elapsed(n125, 120.0f);
+  if (n77 && unit_node_counting(unit, n77, CUCCO_NODE_JUMP))
+    set_counter_elapsed(n77, 600.0f);
+
+  if (want == CUCCO_NODE_SINK) {
+    if (n14 && unit_node_counting(unit, n14, CUCCO_NODE_SINK)) {
+      set_counter_elapsed(n14, j->cucco.counter_val);
+      restore_model_fade(j->actor, &j->cucco);
+      j->active = false;
+    }
+    return;
+  }
+  if (n14 && unit_node_counting(unit, n14, CUCCO_NODE_SINK))
+    set_counter_elapsed(n14, 60.0f);
+  if (want == CUCCO_NODE_FADE_IN) {
+    if (n18 && unit_node_counting(unit, n18, CUCCO_NODE_FADE_IN)) {
+      set_counter_elapsed(n18, j->cucco.counter_val);
+      restore_model_fade(j->actor, &j->cucco);
+      j->active = false;
+    }
+    return;
+  }
+  if (n18 && unit_node_counting(unit, n18, CUCCO_NODE_FADE_IN))
+    set_counter_elapsed(n18, 10.0f);
+  if (want == CUCCO_NODE_LAND && n31 && unit_node_counting(unit, n31, CUCCO_NODE_LAND)) {
+    set_counter_elapsed(n31, j->cucco.counter_val);
+    restore_model_fade(j->actor, &j->cucco);
+    j->active = false;
+  }
+}
+
+static uintptr_t link_lifter_comp(uintptr_t link);
+
+static void step_post_load_jobs(void)
+{
+  bool loading = false;
+  gd_get_bool(F_IS_LOADING_BANC, &loading);
+  uintptr_t link = link_actor();
+  if (loading || !link) {
+    clear_post_load_jobs();
+    return;
+  }
+  for (int i = 0; i < DROWN_JOBS_MAX; i++)
+    if (drown_jobs[i].active)
+      step_drown_job(&drown_jobs[i]);
+  if (held_reapply_frames > 0 && held_reapply_actor) {
+    held_reapply_frames--;
+    if (held_reapply_slot >= 0 && held_reapply_slot < MEMFILE_SLOTS &&
+        sys_mapped(held_reapply_actor, A_PREACTOR + 8, SYS_PERM_R) &&
+        *(const uint32_t *)(held_reapply_actor + A_STATE) < 7u) {
+      const memfile_held_t *h = &memfiles[held_reapply_slot].held;
+      if (h->valid && h->actor_bb && h->actor_bb_size)
+        restore_bb_blob(actor_own_blackboard(held_reapply_actor), h->actor_bb, h->actor_bb_size);
+    } else {
+      held_reapply_frames = 0;
+    }
+    if (held_reapply_frames <= 0)
+      held_reapply_actor = 0;
+  }
+  if (held_watch_frames > 0 && held_watch_actor) {
+    held_watch_frames--;
+    int f = HELD_WATCH_FRAMES - held_watch_frames;
+    uintptr_t lifter = link_lifter_comp(link);
+    uint32_t lst = 99u;
+    if (lifter)
+      sys_read32(lifter + LIFTER_STATE, &lst);
+    bool mapped = sys_mapped(held_watch_actor, A_PREACTOR + 8, SYS_PERM_R);
+    uint32_t ast = mapped ? *(const uint32_t *)(held_watch_actor + A_STATE) : 99u;
+    uint32_t verb = mapped ? actor_cur_verb(held_watch_actor) : 0u;
+    if (lst != held_watch_lstate || ast != held_watch_astate || verb != held_watch_verb) {
+      float p[3] = { 0, 0, 0 };
+      if (mapped && sys_mapped(held_watch_actor + A_POS, 12, SYS_PERM_R))
+        memcpy(p, (const void *)(held_watch_actor + A_POS), 12);
+      float alpha = mapped ? actor_model_alpha(held_watch_actor) : -1.0f;
+      log_printf("memfiles: held +%df target=%#lx lifter_st=%u->%u astate=%u->%u verb=%#x->%#x alpha=%.2f pos=%.1f,%.1f,%.1f", /* not menu text */
+                 f, (unsigned long)held_watch_actor, (unsigned)held_watch_lstate, (unsigned)lst,
+                 (unsigned)held_watch_astate, (unsigned)ast, (unsigned)held_watch_verb, (unsigned)verb,
+                 (double)alpha, (double)p[0], (double)p[1], (double)p[2]);
+      held_watch_lstate = lst;
+      held_watch_astate = ast;
+      held_watch_verb = verb;
+    }
+    if (!mapped || ast >= 7u || held_watch_frames <= 0)
+      held_watch_actor = 0;
+  }
+  for (int i = 0; i < CUCCO_WATCH_MAX; i++) {
+    cucco_watch_t *w = &cucco_watches[i];
+    if (!w->active)
+      continue;
+    w->frames++;
+    if (w->frames > CUCCO_WATCH_FRAMES || !sys_mapped(w->actor, A_PREACTOR + 8, SYS_PERM_R)) {
+      if (w->frames <= CUCCO_WATCH_FRAMES)
+        log_printf("memfiles: cucco +%df %#lx unmapped", w->frames, (unsigned long)w->actor); /* not menu text */
+      w->active = false;
+      continue;
+    }
+    uint32_t ast = *(const uint32_t *)(w->actor + A_STATE);
+    uint32_t verb = actor_cur_verb(w->actor);
+    uint8_t fr = 0;
+    bb_read_bool(actor_own_blackboard(w->actor), "DoForceReturnHome", &fr);
+    float alpha = actor_model_alpha(w->actor);
+    float p[3] = { 0, 0, 0 };
+    if (sys_mapped(w->actor + A_POS, 12, SYS_PERM_R))
+      memcpy(p, (const void *)(w->actor + A_POS), 12);
+    float dx = p[0] - w->last_pos[0], dy = p[1] - w->last_pos[1], dz = p[2] - w->last_pos[2];
+    bool jumped = dx * dx + dy * dy + dz * dz > 25.0f;
+    bool fade_now = alpha < 0.95f && !w->logged_fade;
+    if (ast != w->last_state || verb != w->last_verb || fr != w->last_force_ret || fade_now || jumped) {
+      log_printf("memfiles: cucco +%df %#lx state=%u->%u verb=%#x->%#x alpha=%.2f force_ret=%u pos=%.1f,%.1f,%.1f", /* not menu text */
+                 w->frames, (unsigned long)w->actor, (unsigned)w->last_state, (unsigned)ast,
+                 (unsigned)w->last_verb, (unsigned)verb, (double)alpha, (unsigned)fr,
+                 (double)p[0], (double)p[1], (double)p[2]);
+      w->last_state = ast;
+      w->last_verb = verb;
+      w->last_force_ret = fr;
+      if (fade_now)
+        w->logged_fade = true;
+      memcpy(w->last_pos, p, 12);
+    }
+    if (ast >= 7u)
+      w->active = false;
+  }
+}
+
 /* Priority: 2 = Enemy/Npc (always kept first), 1 = Animal/Horse/Cucco or Life-bearing Obj/DgnObj/Gimmick, 0 = skip.
  * Never track static Obj_/DgnObj_ merely for having PhysicsComponent (dungeon walls/floors/doors all have one). */
 static int actor_track_priority(const char *name, bool has_life, uint32_t state)
@@ -2067,6 +2944,8 @@ static void walk_actor_tree(actor_visit_fn fn, void *ctx)
 typedef struct {
   memfile_t       *st;
   memfile_actor_t *actors;
+  memfile_cucco_t *cuccos;
+  uint32_t         cucco_count;
   uintptr_t        link, cam_actor;
   uint8_t         *bb_pool;
   uint32_t         bb_at;
@@ -2077,6 +2956,7 @@ typedef struct {
 } actor_cap_ctx_t;
 
 static memfile_actor_t cap_actors[MEMFILE_ACTORS_MAX];
+static memfile_cucco_t cap_cuccos[MEMFILE_CUCCOS_MAX];
 static uint8_t         cap_bb_pool[MEMFILE_BB_POOL_MAX];
 static actor_cap_ctx_t cap_actor_ctx;
 
@@ -2163,6 +3043,11 @@ static void capture_actor_cb(uintptr_t actor, void *vctx)
   }
   if (state < 7u && c->bb_pool)
     capture_actor_bb(c->st, e, actor, c->bb_pool, &c->bb_at);
+  if (state < 7u && is_cucco_name(name) && c->cuccos && c->cucco_count < MEMFILE_CUCCOS_MAX) {
+    memfile_cucco_t cs;
+    if (capture_cucco_state(actor, id, e->name_hash, &cs))
+      c->cuccos[c->cucco_count++] = cs;
+  }
   c->prio[dst_idx] = (uint8_t)prio;
 }
 
@@ -2178,6 +3063,7 @@ static bool capture_actors(memfile_t *st)
   cap_actor_ctx = (actor_cap_ctx_t){
     .st = st,
     .actors = cap_actors,
+    .cuccos = cap_cuccos,
     .link = link_actor(),
     .cam_actor = cam_actor,
     .bb_pool = cap_bb_pool,
@@ -2206,6 +3092,17 @@ static bool capture_actors(memfile_t *st)
     }
     memcpy(st->actor_bb, cap_bb_pool, bb_used);
     st->actor_bb_size = bb_used;
+  }
+  if (cap_actor_ctx.cucco_count) {
+    size_t bytes = (size_t)cap_actor_ctx.cucco_count * sizeof(memfile_cucco_t);
+    st->cuccos = alloc16(bytes);
+    if (!st->cuccos) {
+      log_printf("memfile save: out of pool memory for %u cuccos (%u bytes, %u KiB free)", /* not menu text */
+                 (unsigned)cap_actor_ctx.cucco_count, (unsigned)bytes, (unsigned)(pool_free_bytes() >> 10));
+      return false;
+    }
+    memcpy(st->cuccos, cap_cuccos, bytes);
+    st->cucco_count = cap_actor_ctx.cucco_count;
   }
   st->have_actors = true;
   return true;
@@ -2242,18 +3139,23 @@ static void actor_apply_transform(uintptr_t actor, const float pos[3], const flo
   if (!finite_vec3(pos))
     return;
   bool ok_rot = finite_mat33(rot);
+  bool phys_ok = false;
   uintptr_t phys = actor_physics_comp(actor);
   if (phys && z64hd_game->actor_force_set_pos) {
     float nan_rot = 0;
     uint32_t qnan = 0x7FC00000u;
     memcpy(&nan_rot, &qnan, 4);
-    if (MAIN_FN(actor_force_pos_t, z64hd_game->actor_force_set_pos)(phys, pos, ok_rot ? rot : &nan_rot, true))
-      return;
+    phys_ok = MAIN_FN(actor_force_pos_t, z64hd_game->actor_force_set_pos)(phys, pos, ok_rot ? rot : &nan_rot, true);
   }
-  if (sys_mapped(actor + A_FORCE_POS, 12, SYS_PERM_R | SYS_PERM_W))
-    memcpy((void *)(actor + A_FORCE_POS), pos, 12);
-  if (sys_mapped(actor + A_FLAGS, 4, SYS_PERM_R | SYS_PERM_W))
-    *(volatile uint32_t *)(actor + A_FLAGS) &= ~0x8000u;
+  if (!phys_ok) {
+    if (sys_mapped(actor + A_FORCE_POS, 12, SYS_PERM_R | SYS_PERM_W))
+      memcpy((void *)(actor + A_FORCE_POS), pos, 12);
+    if (sys_mapped(actor + A_FLAGS, 4, SYS_PERM_R | SYS_PERM_W))
+      *(volatile uint32_t *)(actor + A_FLAGS) &= ~0x8000u;
+  }
+  /* Always sync A_POS/A_ROT immediately: PhysicsComponent::forceSetPosAndRot only writes the physics
+   * body/CCT, leaving LOD/physics-paused distant actors (>50 m away) stuck at their old world pos so
+   * LOD never wakes them up and L_HELD would bind them while still paused far away. */
   if (sys_mapped(actor + A_POS, 12, SYS_PERM_R | SYS_PERM_W))
     memcpy((void *)(actor + A_POS), pos, 12);
   if (ok_rot && sys_mapped(actor + A_ROT, 36, SYS_PERM_R | SYS_PERM_W))
@@ -2323,6 +3225,23 @@ static void restore_actor_cb(uintptr_t actor, void *vctx)
       c->bb_done[match_idx] = 1;
       c->bb_set++;
     }
+    if (is_cucco_name(name)) {
+      if (c->st->cuccos && c->st->cucco_count) {
+        for (uint32_t ci = 0; ci < c->st->cucco_count; ci++) {
+          const memfile_cucco_t *cc = &c->st->cuccos[ci];
+          if (cc->instance_id == id && (!cc->name_hash || cc->name_hash == nhash)) {
+            if (cc->flags & CUCCO_F_HOME)
+              write_home_pos(actor, cc->home_pos);
+            if (cc->flags & CUCCO_F_DROWN)
+              queue_drown_job(actor, cc);
+            else if (cc->flags & CUCCO_F_FADE)
+              restore_model_fade(actor, cc);
+            break;
+          }
+        }
+      }
+      watch_nearby_cucco(actor, c->st);
+    }
     return;
   }
 
@@ -2365,6 +3284,205 @@ static void restore_actors_pass(const memfile_t *st, bool first, bool last)
                (unsigned)actor_tot_dead, (unsigned)actor_tot_missing);
 }
 
+/* --- held actor capture & restore (PlayerLifterComponent / LiftableComponent, 1.0.0 & 1.1.1) --- */
+
+static uintptr_t link_lifter_comp(uintptr_t link)
+{
+  if (!link || !sys_mapped(link + A_COMPONENTS, 8, SYS_PERM_R))
+    return 0;
+  uintptr_t comps = sys_ptr(link + A_COMPONENTS);
+  if (!comps || (comps & 7u) || !sys_mapped(comps + ACOMP_LIFTER, 8, SYS_PERM_R))
+    return 0;
+  uintptr_t lifter = sys_ptr(comps + ACOMP_LIFTER);
+  return lifter && !(lifter & 7u) && sys_mapped(lifter, LIFTER_STATE + 4u, SYS_PERM_R) ? lifter : 0;
+}
+
+static uintptr_t actor_liftable_comp(uintptr_t actor)
+{
+  if (!actor || !sys_mapped(actor + A_COMPONENTS, 8, SYS_PERM_R))
+    return 0;
+  uintptr_t comps = sys_ptr(actor + A_COMPONENTS);
+  if (!comps || (comps & 7u) || !sys_mapped(comps + ACOMP_LIFTABLE, 8, SYS_PERM_R))
+    return 0;
+  uintptr_t liftable = sys_ptr(comps + ACOMP_LIFTABLE);
+  return liftable && !(liftable & 7u) && sys_mapped(liftable, 0x280, SYS_PERM_R) ? liftable : 0;
+}
+
+static uintptr_t lifter_held_actor(uintptr_t lifter)
+{
+  if (!lifter)
+    return 0;
+  uint32_t st = 0;
+  if (!sys_read32(lifter + LIFTER_STATE, &st) || (st & ~1u) != 2u)
+    return 0;
+  uintptr_t target = handle_actor(lifter + LIFTER_TARGET_LINK);
+  if (!target || (target & 7u) || !sys_mapped(target, A_PREACTOR + 8, SYS_PERM_R))
+    return 0;
+  if (*(const uint32_t *)(target + A_STATE) >= 7u)
+    return 0;
+  return target;
+}
+
+static void drop_link_held_actor(void)
+{
+  if (!z64hd_game || !z64hd_game->lifter_drop)
+    return;
+  uintptr_t link = link_actor();
+  uintptr_t lifter = link_lifter_comp(link);
+  uint32_t lst = 0;
+  if (lifter && sys_read32(lifter + LIFTER_STATE, &lst) && (lst & ~1u) == 2u)
+    MAIN_FN(lifter_drop_t, z64hd_game->lifter_drop)(lifter, 0, 1.0f, 0.0f);
+}
+
+static uint8_t cap_held_bb[HELD_BB_MAX];
+
+static bool capture_held_actor(memfile_t *st)
+{
+  uintptr_t link = link_actor();
+  uintptr_t lifter = link_lifter_comp(link);
+  uintptr_t target = lifter_held_actor(lifter);
+  if (!target || target == link)
+    return true;
+  uintptr_t name_p = sys_ptr(target + A_NAME);
+  if (!name_p || !sys_mapped(name_p, 16, SYS_PERM_R))
+    return true;
+  const char *name = (const char *)name_p;
+  const char *pack = actor_pack_name(target);
+  if (!pack || !pack[0])
+    pack = name;
+
+  memfile_held_t *h = &st->held;
+  *h = (memfile_held_t){ 0 };
+  h->valid = true;
+  actor_preactor_id(target, &h->instance_id);
+  h->name_hash = fnv1a_str(name);
+  snprintf(h->pack_name, sizeof(h->pack_name), "%s", pack);
+  memcpy(h->pos, (const void *)(target + A_POS), sizeof(h->pos));
+  memcpy(h->rot, (const void *)(target + A_ROT), sizeof(h->rot));
+
+  int32_t *cur_hp = 0, *max_hp = 0;
+  if (actor_life_ptrs(target, &cur_hp, &max_hp, false)) {
+    h->flags |= HELD_F_LIFE;
+    h->life = *cur_hp;
+    h->max_life = *max_hp;
+  }
+
+  uint32_t own_len = 0;
+  if (capture_bb_blob(actor_own_blackboard(target), cap_held_bb, HELD_BB_MAX, &own_len) && own_len) {
+    h->actor_bb = alloc16(own_len);
+    if (!h->actor_bb)
+      return false;
+    memcpy(h->actor_bb, cap_held_bb, own_len);
+    h->actor_bb_size = own_len;
+  }
+  uint32_t ai_len = 0;
+  if (capture_bb_blob(actor_ai_blackboard(target), cap_held_bb, HELD_BB_MAX, &ai_len) && ai_len) {
+    h->ai_bb = alloc16(ai_len);
+    if (!h->ai_bb)
+      return false;
+    memcpy(h->ai_bb, cap_held_bb, ai_len);
+    h->ai_bb_size = ai_len;
+  }
+
+  if (is_cucco_name(name) || is_cucco_name(h->pack_name)) {
+    if (capture_cucco_state(target, h->instance_id, h->name_hash, &h->cucco))
+      h->flags |= HELD_F_CUCCO;
+  }
+  return true;
+}
+
+typedef struct {
+  uint64_t  instance_id;
+  uint32_t  name_hash;
+  uintptr_t link;
+  uintptr_t found;
+} find_held_ctx_t;
+
+static void find_held_cb(uintptr_t actor, void *vctx)
+{
+  find_held_ctx_t *c = (find_held_ctx_t *)vctx;
+  if (c->found || actor == c->link)
+    return;
+  uint64_t id = 0;
+  if (!actor_preactor_id(actor, &id) || id != c->instance_id)
+    return;
+  uintptr_t name_p = sys_ptr(actor + A_NAME);
+  if (!name_p || !sys_mapped(name_p, 16, SYS_PERM_R))
+    return;
+  if (c->name_hash && fnv1a_str((const char *)name_p) != c->name_hash)
+    return;
+  uint32_t state = *(const uint32_t *)(actor + A_STATE);
+  if ((state & ~1u) != 4u)
+    return;
+  if (!actor_liftable_comp(actor))
+    return;
+  c->found = actor;
+}
+
+static void apply_held_actor_state(uintptr_t target, const memfile_held_t *h)
+{
+  actor_apply_transform(target, h->pos, h->rot);
+  if (h->flags & HELD_F_LIFE) {
+    int32_t *cur_hp = 0, *max_hp = 0;
+    if (actor_life_ptrs(target, &cur_hp, &max_hp, true)) {
+      int32_t want = h->life;
+      if (want < 0)
+        want = 0;
+      if (*max_hp > 0 && want > *max_hp)
+        want = *max_hp;
+      *cur_hp = want;
+    }
+  }
+  if (h->actor_bb && h->actor_bb_size)
+    restore_bb_blob(actor_own_blackboard(target), h->actor_bb, h->actor_bb_size);
+  if (h->ai_bb && h->ai_bb_size)
+    restore_bb_blob(actor_ai_blackboard(target), h->ai_bb, h->ai_bb_size);
+  if (h->flags & HELD_F_CUCCO) {
+    if (h->cucco.flags & CUCCO_F_HOME)
+      write_home_pos(target, h->cucco.home_pos);
+    if (h->cucco.flags & CUCCO_F_FADE)
+      restore_model_fade(target, &h->cucco);
+  }
+}
+
+static bool bind_held_actor(uintptr_t link, uintptr_t target)
+{
+  if (!z64hd_game || !z64hd_game->actor_link_set || !z64hd_game->lifter_force_lift ||
+      !z64hd_game->player_lift_anim || !z64hd_game->bsa_set_action_verb)
+    return false;
+  uintptr_t lifter = link_lifter_comp(link);
+  if (!lifter)
+    return false;
+  uint64_t link_obj[3] = {
+    z64hd_game->event_req_sub_vt ? MAIN(z64hd_game->event_req_sub_vt) + 0x10u : 0u,
+    0u,
+    0x1FFFFFFFFull,
+  };
+  MAIN_FN(actor_link_set_t, z64hd_game->actor_link_set)(link_obj, target, 0);
+  static const char empty_key[] = "";
+  const char *key_ptr = empty_key;
+  bool ok = MAIN_FN(lifter_force_lift_t, z64hd_game->lifter_force_lift)(lifter, link_obj, &key_ptr, true);
+  int bsa_rc = -1;
+  if (ok) {
+    MAIN_FN(player_lift_anim_t, z64hd_game->player_lift_anim)(link, link_obj);
+    uintptr_t player = 0, base = 0;
+    if (player_and_base_components(&player, &base) &&
+        sys_mapped(player + PLAYER_LIFT_FLAGS, 4, SYS_PERM_R | SYS_PERM_W)) {
+      *(volatile uint32_t *)(player + PLAYER_LIFT_FLAGS) |= 2u;
+    }
+    uintptr_t link_bsa = actor_bsa_comp(link);
+    if (link_bsa)
+      bsa_rc = bsa_request_verb(link_bsa, ACTION_VERB_LIFT, 1u, 0x101u);
+  }
+  uint32_t lst_after = 0;
+  sys_read32(lifter + LIFTER_STATE, &lst_after);
+  log_printf("memfiles: bind_held_actor target=%#lx force_lift=%d state=%u bsa_lift_rc=%d", /* not menu text */
+             (unsigned long)target, ok ? 1 : 0, (unsigned)lst_after, bsa_rc);
+  if (z64hd_game->event_req_sub_dtor)
+    MAIN_FN(actor_link_dtor_t, z64hd_game->event_req_sub_dtor)(link_obj);
+  return ok;
+}
+
 static void finish_load(void)
 {
   if (fast_load) {
@@ -2375,15 +3493,165 @@ static void finish_load(void)
   set_phase(L_IDLE);
 }
 
-static void begin_actors_or_camera(const memfile_t *st)
+static void begin_camera_or_finish(const memfile_t *st)
 {
-  if (memfile_actors && st->have_actors && z64hd_game && z64hd_game->actor_mgr_ptr) {
-    set_phase(L_ACTORS);
-  } else if (st->have_camera) {
+  if (st->have_camera) {
     camera_frames = camera_guard = 0;
     set_phase(L_CAMERA);
   } else {
     finish_load();
+  }
+}
+
+static void begin_held_or_camera(const memfile_t *st)
+{
+  if (st->held.valid && z64hd_game && z64hd_game->actor_link_set && z64hd_game->lifter_force_lift) {
+    held_target_actor = 0;
+    held_settle_frames = 0;
+    held_spawn_tried = false;
+    if (held_spawn_handle)
+      actor_spawn_cancel(&held_spawn_handle);
+    set_phase(L_HELD);
+  } else {
+    begin_camera_or_finish(st);
+  }
+}
+
+static void step_held_restore(const memfile_t *st)
+{
+  const memfile_held_t *h = &st->held;
+  uintptr_t link = link_actor();
+  if (!h->valid || !link) {
+    begin_camera_or_finish(st);
+    return;
+  }
+  if (st->have_pos && !link_at(st, 0))
+    move_link(st);
+
+  if (!held_target_actor) {
+    if (held_spawn_handle) {
+      uintptr_t spawned = 0;
+      spawn_poll_t sp = actor_spawn_poll(&held_spawn_handle, &spawned);
+      if (sp == SPAWN_MADE && spawned) {
+        held_target_actor = spawned;
+      } else if (sp == SPAWN_FAILED || phase_frames > HELD_SPAWN_TIMEOUT) {
+        if (held_spawn_handle)
+          actor_spawn_cancel(&held_spawn_handle);
+        log_printf("memfile %d load: held actor %s failed to spawn", active_slot + 1, h->pack_name); /* not menu text */
+        restore_link_extra(st);
+        begin_camera_or_finish(st);
+        return;
+      } else {
+        return;
+      }
+    } else {
+      if (h->instance_id) {
+        find_held_ctx_t fc = { h->instance_id, h->name_hash, link, 0 };
+        walk_actor_tree(find_held_cb, &fc);
+        if (fc.found)
+          held_target_actor = fc.found;
+      }
+      if (!held_target_actor) {
+        if (h->instance_id && phase_frames < HELD_FIND_FRAMES)
+          return;
+        if (!held_spawn_tried && h->pack_name[0]) {
+          held_spawn_tried = true;
+          float spos[3] = {
+            st->have_pos ? (float)st->x : h->pos[0],
+            st->have_pos ? (float)st->y : h->pos[1],
+            st->have_pos ? (float)st->z : h->pos[2],
+          };
+          float yaw = atan2f(h->rot[2], h->rot[0]) * (180.0f / 3.14159265f);
+          uint32_t res = 0;
+          if (actor_spawn_handle(h->pack_name, spos, yaw, &held_spawn_handle, &res))
+            return;
+        }
+        log_printf("memfile %d load: held actor %s not found", active_slot + 1, h->pack_name); /* not menu text */
+        restore_link_extra(st);
+        begin_camera_or_finish(st);
+        return;
+      }
+    }
+  }
+
+  if (!sys_mapped(held_target_actor, A_PREACTOR + 8, SYS_PERM_R)) {
+    restore_link_extra(st);
+    begin_camera_or_finish(st);
+    return;
+  }
+  uint32_t tstate = *(const uint32_t *)(held_target_actor + A_STATE);
+  if (tstate >= 7u) {
+    log_printf("memfile %d load: held actor %s deleted before bind", active_slot + 1, h->pack_name); /* not menu text */
+    restore_link_extra(st);
+    begin_camera_or_finish(st);
+    return;
+  }
+  if ((tstate & ~1u) != 4u || !actor_liftable_comp(held_target_actor)) {
+    if (phase_frames > HELD_SPAWN_TIMEOUT) {
+      log_printf("memfile %d load: held actor %s never became liftable", active_slot + 1, h->pack_name); /* not menu text */
+      restore_link_extra(st);
+      begin_camera_or_finish(st);
+    }
+    return;
+  }
+
+  uintptr_t lifter = link_lifter_comp(link);
+  uint32_t lst = 0;
+  if (lifter && sys_read32(lifter + LIFTER_STATE, &lst) && lst != 0u) {
+    drop_link_held_actor();
+    if (phase_frames <= HELD_SPAWN_TIMEOUT)
+      return;
+  }
+
+  if (held_settle_frames > 0) {
+    held_settle_frames--;
+    actor_apply_transform(held_target_actor, h->pos, h->rot);
+    if (held_settle_frames > 0)
+      return;
+  } else if (sys_mapped(held_target_actor + A_POS, 12, SYS_PERM_R)) {
+    float cur[3];
+    memcpy(cur, (const void *)(held_target_actor + A_POS), 12);
+    float dx = cur[0] - h->pos[0], dy = cur[1] - h->pos[1], dz = cur[2] - h->pos[2];
+    if (dx * dx + dy * dy + dz * dz > 4.0f) {
+      /* Distant target (e.g. >50 m away in a grotto or non-tracked pot/rock): move it first and let
+       * LOD/physics wake for a couple frames before binding. */
+      apply_held_actor_state(held_target_actor, h);
+      held_settle_frames = HELD_SETTLE_FRAMES;
+      return;
+    }
+  }
+
+  apply_held_actor_state(held_target_actor, h);
+  bool bound = bind_held_actor(link, held_target_actor);
+  log_printf("memfile %d load: held actor %s %#lx %s (astate=%u verb=%#x)", active_slot + 1, h->pack_name, /* not menu text */
+             (unsigned long)held_target_actor, bound ? "bound" : "bind failed",
+             (unsigned)tstate, (unsigned)actor_cur_verb(held_target_actor));
+  if (bound) {
+    if (h->actor_bb && h->actor_bb_size) {
+      held_reapply_actor = held_target_actor;
+      held_reapply_frames = HELD_REAPPLY_BB;
+      held_reapply_slot = active_slot;
+    }
+    held_watch_actor = held_target_actor;
+    held_watch_frames = HELD_WATCH_FRAMES;
+    held_watch_lstate = 3u;
+    if (lifter)
+      sys_read32(lifter + LIFTER_STATE, &held_watch_lstate);
+    held_watch_astate = tstate;
+    held_watch_verb = actor_cur_verb(held_target_actor);
+  }
+  held_target_actor = 0;
+  held_settle_frames = 0;
+  restore_link_extra(st);
+  begin_camera_or_finish(st);
+}
+
+static void begin_actors_or_camera(const memfile_t *st)
+{
+  if (memfile_actors && st->have_actors && z64hd_game && z64hd_game->actor_mgr_ptr) {
+    set_phase(L_ACTORS);
+  } else {
+    begin_held_or_camera(st);
   }
 }
 
@@ -2458,12 +3726,13 @@ static void finish_save(const uint8_t *desc0)
   set_phase(L_IDLE);
   const memfile_t *st = &memfiles[active_slot];
   log_printf("memfile %d saved: %s at \"%s\", %.2f %.2f %.2f facing %.3f,%.3f, life %d, magic %d, time %02u:%02u, "
-             "%u/%u bytes binary (%u KiB pool free), %u scalars + %u strings session, %u actors%s", /* not menu text */
+             "%u/%u bytes binary (%u KiB pool free), %u scalars + %u strings session, %u actors%s%s%s", /* not menu text */
              active_slot + 1, st->map, st->start, st->x, st->y, st->z, st->fx, st->fz, (int)st->life, (int)st->magic,
              st->have_time ? (unsigned)(st->time / 3600) : 99u, st->have_time ? (unsigned)(st->time / 60 % 60) : 99u,
              (unsigned)st->save_size, (unsigned)orig_cap, (unsigned)(pool_free_bytes() >> 10),
              (unsigned)st->s_scalar_count, (unsigned)st->s_str_count,
-             (unsigned)st->actor_count, st->actors_truncated ? " (capped)" : "");
+             (unsigned)st->actor_count, st->actors_truncated ? " (capped)" : "",
+             st->held.valid ? ", holding " : "", st->held.valid ? st->held.pack_name : "");
   gfx_logf("memfile %d saved", active_slot + 1);
 }
 
@@ -2524,6 +3793,7 @@ bool memfile_save(int s)
   }
 
   free_memfile(&staging);
+  clear_post_load_jobs();
   /* Capture small session/actor metadata first so staging.save_buf sits at the tail of the pool and
    * pool_shrink() in finish_save() coalesces its unused tail directly into the remaining free space. */
   int sess = capture_session(&staging);
@@ -2533,7 +3803,7 @@ bool memfile_save(int s)
                                   : "can't save a memfile: out of memory");
     return false;
   }
-  if (!capture_actors(&staging)) {
+  if (!capture_actors(&staging) || !capture_held_actor(&staging)) {
     free_memfile(&staging);
     gfx_notice("can't save a memfile: out of memory");
     return false;
@@ -2589,6 +3859,7 @@ bool memfile_save(int s)
 static void fail(const char *notice)
 {
   clear_overrides();
+  clear_post_load_jobs();
   log_printf("memfile %d load: %s", active_slot + 1, notice); /* not menu text */
   gfx_notice(notice);
   status[0] = 0;
@@ -2613,6 +3884,7 @@ static bool can_fast_reload(const memfile_t *st)
 
 static bool start_load_now(int s, uint8_t *mgr)
 {
+  clear_post_load_jobs();
   memfile_t *st = &memfiles[s];
   active_slot = s;
   if (can_fast_reload(st)) {
@@ -2720,6 +3992,7 @@ static void step_saving(uint8_t *mgr, uint8_t *desc0)
 
 static void trigger_reset_gimmick(void)
 {
+  drop_link_held_actor();
   reset_preactor_flags();
   gd_poke_int(F_RESET_GIMMICK_OPT, 0);
   gd_set_int(F_RESET_GIMMICK_OPT, 0);
@@ -2902,15 +4175,16 @@ static void step_post_move(const memfile_t *st)
   }
 
   if (phase == L_ACTORS) {
+    if (st->held.valid && st->have_pos && !link_at(st, 0))
+      move_link(st);
     restore_actors_pass(st, phase_frames == 1, phase_frames >= ACTOR_RESTORE_FRAMES);
-    if (phase_frames >= ACTOR_RESTORE_FRAMES) {
-      if (st->have_camera) {
-        camera_frames = camera_guard = 0;
-        set_phase(L_CAMERA);
-      } else {
-        finish_load();
-      }
-    }
+    if (phase_frames >= ACTOR_RESTORE_FRAMES)
+      begin_held_or_camera(st);
+    return;
+  }
+
+  if (phase == L_HELD) {
+    step_held_restore(st);
     return;
   }
 
@@ -2995,6 +4269,7 @@ static void step_post_move(const memfile_t *st)
 void memfile_frame(void)
 {
   retire_inflight_buf();
+  step_post_load_jobs();
   if (phase == L_IDLE)
     return;
   phase_frames++;
@@ -3060,10 +4335,13 @@ void memfile_frame(void)
 #define SZM_CAMERA      SZM_TAG('C', 'A', 'M', 'R') /* the player camera and its AI action nodes */
 #define SZM_ACTORS      SZM_TAG('A', 'C', 'T', 'R') /* scene actors: { u8 flags, u32 record_size, records } */
 #define SZM_ACTOR_BB    SZM_TAG('A', 'B', 'B', 'D') /* per-actor Blackboard primitive pool */
+#define SZM_CUCCO       SZM_TAG('C', 'U', 'C', 'O') /* per-Cucco home/drown/fade/respawn state */
+#define SZM_HELD        SZM_TAG('H', 'E', 'L', 'D') /* actor currently held by Link */
 #define SZM_EXTRA       SZM_TAG('X', 'T', 'R', 'A') /* Link velocity, fall/JS history, SavePos, RNG, 8-unit ring */
 #define SZM_SCALAR_SIZE 18u /* format 2's records; a file's own are at least this */
 #define SZM_STRING_SIZE (4u + GD_STR_LEN)
 #define SZM_ACTOR_SIZE  78u /* + u32 bb_off, u32 bb_len after name_hash */
+#define SZM_CUCCO_SIZE  56u
 #define SZM_FILE_MAX    (GD_MAX_SAVE_BUF + (1u << 20))
 #define SZM_SLACK       0x10000u /* room for every section but the snapshot and the session fields */
 #define SZM_DIR         SD_DIR "/" MEMFILE_DIR_NAME
@@ -3163,6 +4441,7 @@ static uint8_t *szm_encode(const memfile_t *st, const char *name, uint32_t *size
 {
   uint32_t cap = (uint32_t)sizeof(szm_header_t) + st->save_size + st->s_scalar_count * SZM_SCALAR_SIZE +
                  st->s_str_count * SZM_STRING_SIZE + st->actor_count * SZM_ACTOR_SIZE + st->actor_bb_size +
+                 st->cucco_count * SZM_CUCCO_SIZE + st->held.actor_bb_size + st->held.ai_bb_size +
                  CAMERA_ACTIONS * (16u + ACTION_BYTES) + SZM_SLACK;
   szm_out_t o = { alloc16(cap), (uint32_t)sizeof(szm_header_t), cap, true };
   if (!o.p)
@@ -3256,6 +4535,62 @@ static uint8_t *szm_encode(const memfile_t *st, const char *name, uint32_t *size
   if (st->actor_bb && st->actor_bb_size) {
     at = out_begin(&o, SZM_ACTOR_BB);
     out_bytes(&o, st->actor_bb, st->actor_bb_size);
+    out_end(&o, at);
+  }
+
+  if (st->cuccos && st->cucco_count) {
+    at = out_begin(&o, SZM_CUCCO);
+    record = SZM_CUCCO_SIZE;
+    OUT(&o, record);
+    for (uint32_t i = 0; i < st->cucco_count; i++) {
+      const memfile_cucco_t *c = &st->cuccos[i];
+      uint8_t zero8 = 0;
+      uint16_t zero16 = 0;
+      OUT(&o, c->instance_id);
+      OUT(&o, c->name_hash);
+      OUT(&o, c->flags);
+      OUT(&o, c->model_fade_active);
+      OUT(&o, c->model_vis_flags);
+      OUT(&o, zero8);
+      OUT(&o, c->active_node);
+      OUT(&o, zero16);
+      OUT(&o, c->home_pos);
+      OUT(&o, c->counter_val);
+      OUT(&o, c->air_val);
+      OUT(&o, c->landing_water_count);
+      OUT(&o, c->model_alpha);
+      OUT(&o, c->model_fade_step);
+      OUT(&o, c->model_fade_flags);
+    }
+    out_end(&o, at);
+  }
+
+  if (st->held.valid) {
+    const memfile_held_t *h = &st->held;
+    at = out_begin(&o, SZM_HELD);
+    OUT(&o, h->flags);
+    OUT(&o, h->instance_id);
+    OUT(&o, h->name_hash);
+    out_bytes(&o, h->pack_name, HELD_NAME_LEN);
+    OUT(&o, h->pos);
+    OUT(&o, h->rot);
+    OUT(&o, h->life);
+    OUT(&o, h->max_life);
+    out_blob(&o, h->actor_bb, h->actor_bb ? h->actor_bb_size : 0u);
+    out_blob(&o, h->ai_bb, h->ai_bb ? h->ai_bb_size : 0u);
+    if (h->flags & HELD_F_CUCCO) {
+      OUT(&o, h->cucco.flags);
+      OUT(&o, h->cucco.model_fade_active);
+      OUT(&o, h->cucco.model_vis_flags);
+      OUT(&o, h->cucco.active_node);
+      OUT(&o, h->cucco.home_pos);
+      OUT(&o, h->cucco.counter_val);
+      OUT(&o, h->cucco.air_val);
+      OUT(&o, h->cucco.landing_water_count);
+      OUT(&o, h->cucco.model_alpha);
+      OUT(&o, h->cucco.model_fade_step);
+      OUT(&o, h->cucco.model_fade_flags);
+    }
     out_end(&o, at);
   }
 
@@ -3458,6 +4793,82 @@ static bool szm_actors(const uint8_t *p, uint32_t size, memfile_t *st)
   return true;
 }
 
+static bool szm_cuccos(const uint8_t *p, uint32_t size, memfile_t *st)
+{
+  uint32_t record = 0, count = in_records(&p, size, SZM_CUCCO_SIZE, &record);
+  if (count > MEMFILE_CUCCOS_MAX)
+    count = MEMFILE_CUCCOS_MAX;
+  if (!count)
+    return true;
+  st->cuccos = alloc16((size_t)count * sizeof(memfile_cucco_t));
+  if (!st->cuccos)
+    return false;
+  for (uint32_t i = 0; i < count; i++, p += record) {
+    memfile_cucco_t c = { 0 };
+    memcpy(&c.instance_id, p + 0, 8);
+    memcpy(&c.name_hash, p + 8, 4);
+    c.flags = p[12];
+    c.model_fade_active = p[13];
+    c.model_vis_flags = p[14];
+    memcpy(&c.active_node, p + 16, 2);
+    memcpy(c.home_pos, p + 20, 12);
+    memcpy(&c.counter_val, p + 32, 4);
+    memcpy(&c.air_val, p + 36, 4);
+    memcpy(&c.landing_water_count, p + 40, 4);
+    memcpy(&c.model_alpha, p + 44, 4);
+    memcpy(&c.model_fade_step, p + 48, 4);
+    memcpy(&c.model_fade_flags, p + 52, 4);
+    if (c.instance_id && c.instance_id != UINT64_MAX && c.instance_id != 0xFFFFFFFFull)
+      st->cuccos[st->cucco_count++] = c;
+  }
+  return true;
+}
+
+static bool szm_held(szm_in_t *in, memfile_t *st)
+{
+  memfile_held_t h = { 0 };
+  szm_in_t abb = { 0 }, aibb = { 0 };
+  if (!IN(in, h.flags) || !IN(in, h.instance_id) || !IN(in, h.name_hash) ||
+      !in_bytes(in, h.pack_name, HELD_NAME_LEN) || !IN(in, h.pos) || !IN(in, h.rot) ||
+      !IN(in, h.life) || !IN(in, h.max_life) || !in_sized(in, &abb) || !in_sized(in, &aibb))
+    return true;
+  h.pack_name[HELD_NAME_LEN - 1] = 0;
+  if (!h.pack_name[0] && !h.instance_id)
+    return true;
+  if (abb.n > HELD_BB_MAX || aibb.n > HELD_BB_MAX)
+    return true;
+  if (abb.n) {
+    h.actor_bb = alloc16(abb.n);
+    if (!h.actor_bb)
+      return false;
+    memcpy(h.actor_bb, abb.p, abb.n);
+    h.actor_bb_size = abb.n;
+  }
+  if (aibb.n) {
+    h.ai_bb = alloc16(aibb.n);
+    if (!h.ai_bb) {
+      free16(h.actor_bb);
+      return false;
+    }
+    memcpy(h.ai_bb, aibb.p, aibb.n);
+    h.ai_bb_size = aibb.n;
+  }
+  if (h.flags & HELD_F_CUCCO) {
+    h.cucco.instance_id = h.instance_id;
+    h.cucco.name_hash = h.name_hash;
+    h.cucco.active_node = 0xFFFFu;
+    h.cucco.air_val = -1.0f;
+    if (!IN(in, h.cucco.flags) || !IN(in, h.cucco.model_fade_active) || !IN(in, h.cucco.model_vis_flags) ||
+        !IN(in, h.cucco.active_node) || !IN(in, h.cucco.home_pos) || !IN(in, h.cucco.counter_val) ||
+        !IN(in, h.cucco.air_val) || !IN(in, h.cucco.landing_water_count) || !IN(in, h.cucco.model_alpha) ||
+        !IN(in, h.cucco.model_fade_step) || !IN(in, h.cucco.model_fade_flags))
+      h.flags &= (uint8_t)~HELD_F_CUCCO;
+  }
+  h.valid = true;
+  st->held = h;
+  return true;
+}
+
 static void szm_extra(szm_in_t *in, memfile_t *st)
 {
   uint8_t xflags = 0;
@@ -3550,6 +4961,12 @@ static const char *szm_decode(const uint8_t *p, uint32_t n, memfile_t *st)
         memcpy(st->actor_bb, body, size);
         st->actor_bb_size = size;
       }
+    } else if (tag == SZM_CUCCO && !st->cuccos) {
+      if (!szm_cuccos(body, size, st))
+        return szm_no_mem;
+    } else if (tag == SZM_HELD && !st->held.valid) {
+      if (!szm_held(&in, st))
+        return szm_no_mem;
     } else if (tag == SZM_EXTRA) {
       szm_extra(&in, st);
     }
@@ -3927,6 +5344,7 @@ bool memfile_import(int i, int s)
 int  memfile_slot(void) { return slot; }
 void memfile_set_slot(int s) { if (s >= 0 && s < MEMFILE_SLOTS) slot = s; }
 bool memfile_busy(void) { return phase != L_IDLE && !(phase == L_CAMERA && camera_guard); }
+bool memfile_loading(void) { return phase >= L_CANCEL_EVENT && !(phase == L_CAMERA && camera_guard); }
 
 void memfile_binds_frame(bool menu_open)
 {

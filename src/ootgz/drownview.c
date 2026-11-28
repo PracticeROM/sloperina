@@ -17,6 +17,7 @@
 #include "gfx.h"
 #include "lang.h"
 #include "link.h" /* frame_counter */
+#include "memfile.h" /* memfile_loading */
 #include "sys.h"
 #include "watches.h"
 #include "z64hd.h"
@@ -294,7 +295,12 @@ enum {
 #define FINDING 600       /* frames "finding a safe spot" is kept up for a horse */
 #define HANDOVER 3        /* frames between one counter ending and the next starting, still counted as the first */
 
+#define REBIND_FRAMES 60  /* frames after a memfile load to rebind a watched actor by Banc InstanceId */
+
 static uintptr_t watched;
+static uint64_t watched_id;     /* Banc PreActor InstanceId, to rebind across memfile loads */
+static char watched_pack[64];   /* fallback for dynamically spawned held actors (id == 0) */
+static int watched_rebind;      /* frames left to rebind after memfile load completes */
 static int active = -1;     /* the counter running now (its index in the info), -1 none */
 static int last_index = -1; /* the node index of the last one that ran */
 static int since = 1000;    /* frames since one ran */
@@ -304,6 +310,53 @@ static int jumps;           /* the cucco's jumps this time in the water */
 #define RATE_FRAMES 32
 static float rate_of[RATE_FRAMES];
 static int n_rate, rate_at;
+
+static void reset_watch_history(uintptr_t actor)
+{
+  active = -1, last_index = -1, since = 1000, jumps = 0, n_rate = 0, rate_at = 0;
+  for (int i = 0; actor && i < INFOS; i++)
+    if (infos[i].actor == actor) {
+      infos[i].at = 0; /* force re-validation of controller/nodes after load */
+      for (int c = 0; c < infos[i].n_counters; c++)
+        infos[i].counters[c].last = -1, infos[i].counters[c].quiet = 1000;
+    }
+}
+
+static bool has_drown_watches(void)
+{
+  return watch_has(W_DROWN_STATE) || watch_has(W_DROWN) || watch_has(W_FADE_OUT) || watch_has(W_RESPAWN);
+}
+
+static void remove_drown_watches(void)
+{
+  for (int i = 0; i < watch_count; i++)
+    if (watch_list[i].id == W_DROWN_STATE || watch_list[i].id == W_DROWN || watch_list[i].id == W_FADE_OUT ||
+        watch_list[i].id == W_RESPAWN)
+      watch_remove(i--);
+}
+
+static bool str_eq(const char *a, const char *b)
+{
+  while (*a && *a == *b)
+    a++, b++;
+  return *a == *b;
+}
+
+static uintptr_t find_rebind_actor(uint64_t id, const char *pack)
+{
+  if (id)
+    return actor_find_instance(id);
+  if (!pack || !pack[0])
+    return 0;
+  actor_near_t near_list[16];
+  int n = actors_near(3.0f, near_list, 16);
+  for (int i = 0; i < n; i++) {
+    const char *p = actor_pack_name(near_list[i].actor);
+    if (p && str_eq(p, pack))
+      return near_list[i].actor;
+  }
+  return 0;
+}
 
 static float per_frame(void)
 {
@@ -315,11 +368,20 @@ static float per_frame(void)
 
 void drownview_watch(uintptr_t actor)
 {
-  if (actor == watched)
+  if (actor == watched && (!actor || watched_rebind == 0))
     return;
-  watched = actor, active = -1, last_index = -1, since = 1000, jumps = 0, n_rate = 0, rate_at = 0;
-  if (actor)
-    log_printf("drown watch: %#lx", (unsigned long)actor);
+  watched = actor;
+  watched_id = 0;
+  watched_pack[0] = 0;
+  watched_rebind = 0;
+  reset_watch_history(actor);
+  if (actor) {
+    actor_instance_id(actor, &watched_id);
+    const char *pack = actor_pack_name(actor);
+    if (pack && pack[0])
+      snprintf(watched_pack, sizeof(watched_pack), "%s", pack);
+    log_printf("drown watch: %#lx (id %#lx)", (unsigned long)actor, (unsigned long)watched_id);
+  }
 }
 
 uintptr_t drownview_watched(void) { return watched; }
@@ -592,13 +654,19 @@ int drownview_respawn(uintptr_t actor, float out[3])
 
 /* each actor's own switch: its respawn point drawn */
 #define SHOWN_MAX 8
-static uintptr_t shown[SHOWN_MAX];
+typedef struct {
+  uintptr_t actor;
+  uint64_t id;
+  char pack[64];
+  int rebind;
+} shown_entry_t;
+static shown_entry_t shown[SHOWN_MAX];
 static int n_shown;
 
 bool drownview_own(uintptr_t actor)
 {
   for (int i = 0; actor && i < n_shown; i++)
-    if (shown[i] == actor)
+    if (shown[i].actor == actor)
       return true;
   return false;
 }
@@ -606,14 +674,19 @@ bool drownview_own(uintptr_t actor)
 void drownview_toggle(uintptr_t actor)
 {
   for (int i = 0; i < n_shown; i++)
-    if (shown[i] == actor) {
+    if (shown[i].actor == actor) {
       shown[i] = shown[--n_shown];
       log_printf("respawn point: %#lx off", (unsigned long)actor);
       return;
     }
   if (n_shown == SHOWN_MAX)
     memmove(&shown[0], &shown[1], sizeof(shown[0]) * --n_shown);
-  shown[n_shown++] = actor;
+  shown_entry_t *e = &shown[n_shown++];
+  *e = (shown_entry_t){ .actor = actor };
+  actor_instance_id(actor, &e->id);
+  const char *pack = actor_pack_name(actor);
+  if (pack && pack[0])
+    snprintf(e->pack, sizeof(e->pack), "%s", pack);
   float p[3] = { 0, 0, 0 };
   int at = drownview_respawn(actor, p);
   log_printf("respawn point: %#lx on (%d: %.2f %.2f %.2f)", (unsigned long)actor, at, (double)p[0], (double)p[1],
@@ -622,22 +695,76 @@ void drownview_toggle(uintptr_t actor)
     gfx_notice(T("it hasn't landed anywhere yet: it comes back on the nearest safe spot"));
 }
 
-bool drownview_active(void) { return n_shown > 0; }
+bool drownview_active(void)
+{
+  for (int i = 0; i < n_shown; i++)
+    if (shown[i].actor)
+      return true;
+  return false;
+}
 
 void drownview_frame(void)
 {
   now++;
+  static bool was_loading;
+  bool loading = memfile_loading();
+  bool in_load = loading || was_loading;
   actor_read_t a;
-  if (watched && (!actor_read(watched, &a) || !a.running)) { /* gone (a map change) */
-    drownview_watch(0);
-    for (int i = 0; i < watch_count; i++)
-      if (watch_list[i].id == W_DROWN_STATE || watch_list[i].id == W_DROWN || watch_list[i].id == W_FADE_OUT ||
-          watch_list[i].id == W_RESPAWN)
-        watch_remove(i--);
+  if (watched) {
+    if (!actor_read(watched, &a) || !a.running) {
+      if (in_load && (watched_id || watched_pack[0])) {
+        watched = 0;
+        watched_rebind = REBIND_FRAMES;
+        reset_watch_history(0);
+      } else {
+        drownview_watch(0);
+        remove_drown_watches();
+      }
+    } else if (was_loading && !loading) {
+      reset_watch_history(watched);
+    }
+  } else if (watched_id || watched_pack[0]) {
+    if (!has_drown_watches()) {
+      watched_id = 0;
+      watched_pack[0] = 0;
+      watched_rebind = 0;
+    } else if (!loading) {
+      uintptr_t found = find_rebind_actor(watched_id, watched_pack);
+      if (found && drownview_kind(found) != DV_NONE) {
+        watched = found;
+        watched_rebind = 0;
+        reset_watch_history(found);
+        log_printf("drown watch: rebound %#lx (id %#lx)", (unsigned long)found, (unsigned long)watched_id);
+      } else if (--watched_rebind <= 0) {
+        watched_id = 0;
+        watched_pack[0] = 0;
+        watched_rebind = 0;
+        remove_drown_watches();
+      }
+    }
   }
-  for (int i = 0; i < n_shown; i++)
-    if (!actor_read(shown[i], &a) || !a.running)
-      shown[i--] = shown[--n_shown];
+  for (int i = 0; i < n_shown; i++) {
+    if (shown[i].actor) {
+      if (!actor_read(shown[i].actor, &a) || !a.running) {
+        if (in_load && (shown[i].id || shown[i].pack[0])) {
+          shown[i].actor = 0;
+          shown[i].rebind = REBIND_FRAMES;
+        } else {
+          shown[i--] = shown[--n_shown];
+        }
+      }
+    } else if (!loading) {
+      uintptr_t found = find_rebind_actor(shown[i].id, shown[i].pack);
+      if (found && drownview_kind(found) != DV_NONE) {
+        shown[i].actor = found;
+        shown[i].rebind = 0;
+        log_printf("respawn point: rebound %#lx (id %#lx)", (unsigned long)found, (unsigned long)shown[i].id);
+      } else if (--shown[i].rebind <= 0) {
+        shown[i--] = shown[--n_shown];
+      }
+    }
+  }
+  was_loading = loading;
   static uint32_t last_frame;
   uint32_t frame = z64hd_game ? frame_counter() : 0;
   if (watched && frame != last_frame) /* only frames the game ran (frame advance holds it, the pause screen...) */
@@ -668,8 +795,10 @@ int drownview_lines(float ends[][2][3], uint8_t colours[], int max)
 {
   out_ends = ends, out_colours = colours, n_out = 0, max_out = max;
   for (int s = 0; s < n_shown; s++) {
+    if (!shown[s].actor)
+      continue;
     float p[3];
-    int at = drownview_respawn(shown[s], p);
+    int at = drownview_respawn(shown[s].actor, p);
     if (at == DV_AT_NONE || at == DV_AT_SAFE_SPOT)
       continue;
     float prev[3], q[3];
@@ -687,7 +816,7 @@ int drownview_lines(float ends[][2][3], uint8_t colours[], int max)
       line(bottom, top);
     }
     actor_read_t a;
-    if (actor_read(shown[s], &a)) {
+    if (actor_read(shown[s].actor, &a)) {
       float dx = a.pos[0] - p[0], dy = a.pos[1] - p[1], dz = a.pos[2] - p[2];
       if (dx * dx + dy * dy + dz * dz > 1.0f) {
         float top[3] = { p[0], p[1] + BEAM_HEIGHT, p[2] };

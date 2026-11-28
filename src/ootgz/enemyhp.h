@@ -66,6 +66,10 @@ bool actor_layout_string(uintptr_t actor, const char *key, char *out, int len);
 /* actors.c: the name of the pack it was made from (the layout's Gyaml: Obj_TBox_A_01), where its own name (+0x20,
  * actor_read's) is its ActorName (TBox_Field_Iron, shared by every field chest); 0 if unreadable; game thread */
 const char *actor_pack_name(uintptr_t actor);
+/* actors.c: Banc PreActor InstanceId ([[actor+0x3D8]+0x88], false for dynamically spawned actors) and lookup of a
+ * currently running actor by that ID (0 if not loaded); game thread */
+bool actor_instance_id(uintptr_t actor, uint64_t *id_out);
+uintptr_t actor_find_instance(uint64_t instance_id);
 
 /* actors.c: kill an actor found earlier, the game's way (FINDINGS 9.27): a death request, reason FallIntoAbyss (the
  * void's), to its Death component; with none, an NPC or a thing (Npc_, Obj_, Item_) is deleted as the AI's delete

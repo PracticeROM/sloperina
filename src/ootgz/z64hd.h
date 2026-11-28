@@ -253,6 +253,14 @@ struct z64hd_build {
   uint32_t generic_counter_node_vtable;
   /* [main+this]: the pause manager (FINDINGS 9.1: its pause types and their request counts; pausemgr.c) */
   uint32_t pause_mgr_ptr;
+  /* Held-actor & BSA action restore (memfile.c): ActorLink::set(link, actor, flags), LifterComponent::drop(lifter,
+   * reason, s0, s1), LifterComponent::forceLift(lifter, link, &key, flag), player_lift_anim(link_actor, link), and
+   * BSAComponent::setActionVerb(bsa, req_0x60, flag) (FINDINGS 9.22). 0: not known for this build */
+  uint32_t actor_link_set;
+  uint32_t lifter_drop;
+  uint32_t lifter_force_lift;
+  uint32_t player_lift_anim;
+  uint32_t bsa_set_action_verb;
   struct z64hd_link_path link_paths[5];
 };
 

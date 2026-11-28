@@ -22,23 +22,35 @@ static void      fake_camera_arrive(uintptr_t component);
 static bool      fake_actor_force_set_pos(uintptr_t phys, const float pos[3], const float rot[9], bool immediate);
 static void      fake_actor_request_delete(uintptr_t actor, uint32_t reason);
 static void      fake_preactor_update_flags(void *node);
+static void      fake_actor_link_set(void *link, uintptr_t actor, uint16_t flags);
+static void      fake_actor_link_dtor(void *link);
+static bool      fake_lifter_drop(uintptr_t lifter, int reason, float s0, float s1);
+static bool      fake_lifter_force_lift(uintptr_t lifter, void *link, const char *const *key, bool flag);
+static void      fake_player_lift_anim(uintptr_t link_actor, void *link);
+static int       fake_bsa_set_action_verb(uintptr_t bsa, const void *req, bool flag);
 
 static struct z64hd_build test_build;
 const struct z64hd_build *z64hd_game = &test_build;
 uintptr_t z64hd_main;
 
-#define OFF_GD_REQ_SAVE      0x1100u
-#define OFF_GD_REQ_LOAD      0x1200u
-#define OFF_WM_SET_TIME      0x1300u
-#define OFF_WM_ON_SAVE       0x1400u
-#define OFF_WM_ON_LOAD       0x1500u
-#define OFF_NAVI_GET         0x1600u
-#define OFF_NAVI_ON_LOAD     0x1700u
-#define OFF_CAMERA_SNAP      0x1800u
-#define OFF_CAMERA_ARRIVE    0x1900u
-#define OFF_ACTOR_FORCE_POS  0x1A00u
-#define OFF_ACTOR_REQ_DELETE 0x1B00u
-#define OFF_PREACTOR_UPDATE  0x1C00u
+#define OFF_GD_REQ_SAVE       0x1100u
+#define OFF_GD_REQ_LOAD       0x1200u
+#define OFF_WM_SET_TIME       0x1300u
+#define OFF_WM_ON_SAVE        0x1400u
+#define OFF_WM_ON_LOAD        0x1500u
+#define OFF_NAVI_GET          0x1600u
+#define OFF_NAVI_ON_LOAD      0x1700u
+#define OFF_CAMERA_SNAP       0x1800u
+#define OFF_CAMERA_ARRIVE     0x1900u
+#define OFF_ACTOR_FORCE_POS   0x1A00u
+#define OFF_ACTOR_REQ_DELETE  0x1B00u
+#define OFF_PREACTOR_UPDATE   0x1C00u
+#define OFF_ACTOR_LINK_SET    0x1D00u
+#define OFF_ACTOR_LINK_DTOR   0x1E00u
+#define OFF_LIFTER_DROP       0x1F00u
+#define OFF_LIFTER_FORCE_LIFT 0x2000u
+#define OFF_PLAYER_LIFT_ANIM  0x2100u
+#define OFF_BSA_SET_VERB      0x2200u
 
 static uintptr_t function_at(uint32_t off)
 {
@@ -53,6 +65,12 @@ static uintptr_t function_at(uint32_t off)
   if (off == OFF_ACTOR_FORCE_POS) return (uintptr_t)fake_actor_force_set_pos;
   if (off == OFF_ACTOR_REQ_DELETE) return (uintptr_t)fake_actor_request_delete;
   if (off == OFF_PREACTOR_UPDATE) return (uintptr_t)fake_preactor_update_flags;
+  if (off == OFF_ACTOR_LINK_SET) return (uintptr_t)fake_actor_link_set;
+  if (off == OFF_ACTOR_LINK_DTOR) return (uintptr_t)fake_actor_link_dtor;
+  if (off == OFF_LIFTER_DROP) return (uintptr_t)fake_lifter_drop;
+  if (off == OFF_LIFTER_FORCE_LIFT) return (uintptr_t)fake_lifter_force_lift;
+  if (off == OFF_PLAYER_LIFT_ANIM) return (uintptr_t)fake_player_lift_anim;
+  if (off == OFF_BSA_SET_VERB) return (uintptr_t)fake_bsa_set_action_verb;
   assert(off == OFF_CAMERA_SNAP);
   return (uintptr_t)fake_camera_snap;
 }
@@ -568,6 +586,123 @@ bool cct_teleport(const vec3f_t *p, const float *rot)
 bool cct_clear_fall_distance(uintptr_t actor) { (void)actor; return true; }
 bool gear_reapply_now(void) { gear_calls++; return true; }
 bool cmd_pressed(command_t cmd) { (void)cmd; return false; }
+
+/* Mock actor_pack_name / actor_spawn_handle / Lifter / BSA test doubles */
+static int       link_set_calls, link_dtor_calls, lifter_drop_calls, lifter_force_calls, lift_anim_calls, bsa_verb_calls;
+static uintptr_t last_link_set_actor, last_lift_target, last_lift_anim_actor, last_bsa_target;
+static uint32_t  last_bsa_verb, last_bsa_slot;
+static uint16_t  last_bsa_flags;
+static uintptr_t sim_spawn_result_actor;
+static int       sim_spawn_wait_frames, sim_spawn_calls, sim_spawn_cancel_calls;
+static char      sim_spawn_last_name[64];
+static uint16_t  sim_spawn_handle_state;
+
+const char *actor_pack_name(uintptr_t actor)
+{
+  uintptr_t p = actor ? sys_ptr(actor + 0x260) : 0;
+  return p && sys_mapped(p, 8, SYS_PERM_R) ? (const char *)p : 0;
+}
+
+bool actor_spawn_handle(const char *name, const float pos[3], float yaw_degrees, uintptr_t *handle, uint32_t *result)
+{
+  (void)pos; (void)yaw_degrees;
+  sim_spawn_calls++;
+  snprintf(sim_spawn_last_name, sizeof(sim_spawn_last_name), "%s", name ? name : "");
+  if (!sim_spawn_result_actor) {
+    *handle = 0;
+    *result = 1;
+    return false;
+  }
+  sim_spawn_handle_state = sim_spawn_wait_frames > 0 ? 1u : 3u;
+  *handle = (uintptr_t)&sim_spawn_handle_state;
+  *result = 0;
+  return true;
+}
+
+spawn_poll_t actor_spawn_poll(uintptr_t *handle, uintptr_t *actor)
+{
+  *actor = 0;
+  if (!*handle)
+    return SPAWN_FAILED;
+  if (sim_spawn_wait_frames > 0) {
+    sim_spawn_wait_frames--;
+    return SPAWN_WAITING;
+  }
+  *actor = sim_spawn_result_actor;
+  *handle = 0;
+  return *actor ? SPAWN_MADE : SPAWN_FAILED;
+}
+
+void actor_spawn_cancel(uintptr_t *handle)
+{
+  if (*handle) {
+    sim_spawn_cancel_calls++;
+    *handle = 0;
+  }
+}
+
+static void fake_actor_link_set(void *link, uintptr_t actor, uint16_t flags)
+{
+  (void)flags;
+  link_set_calls++;
+  last_link_set_actor = actor;
+  uint64_t *w = (uint64_t *)link;
+  w[1] = actor; /* store actor directly for fake_lifter_force_lift / fake_player_lift_anim */
+  w[2] = 1u;
+}
+
+static void fake_actor_link_dtor(void *link)
+{
+  (void)link;
+  link_dtor_calls++;
+}
+
+static bool fake_lifter_drop(uintptr_t lifter, int reason, float s0, float s1)
+{
+  (void)reason; (void)s0; (void)s1;
+  lifter_drop_calls++;
+  if (sys_mapped(lifter + LIFTER_STATE, 4, SYS_PERM_R | SYS_PERM_W))
+    *(uint32_t *)(lifter + LIFTER_STATE) = 0;
+  return true;
+}
+
+static bool fake_lifter_force_lift(uintptr_t lifter, void *link, const char *const *key, bool flag)
+{
+  (void)key; (void)flag;
+  lifter_force_calls++;
+  uintptr_t actor = ((const uint64_t *)link)[1];
+  last_lift_target = actor;
+  if (sys_mapped(lifter + LIFTER_STATE, 4, SYS_PERM_R | SYS_PERM_W))
+    *(uint32_t *)(lifter + LIFTER_STATE) = 3;
+  return actor != 0;
+}
+
+static void fake_player_lift_anim(uintptr_t link_actor_arg, void *link)
+{
+  (void)link_actor_arg;
+  lift_anim_calls++;
+  last_lift_anim_actor = ((const uint64_t *)link)[1];
+}
+
+static int fake_bsa_set_action_verb(uintptr_t bsa, const void *req, bool flag)
+{
+  (void)flag;
+  bsa_verb_calls++;
+  last_bsa_target = bsa;
+  const uint8_t *r = (const uint8_t *)req;
+  memcpy(&last_bsa_slot, r + 0x48, 4);
+  memcpy(&last_bsa_verb, r + 0x4C, 4);
+  memcpy(&last_bsa_flags, r + 0x50, 2);
+  if (last_bsa_slot <= 4u && sys_mapped(bsa + BSA_ACTION_SLOTS + (size_t)last_bsa_slot * 8u, 8, SYS_PERM_R)) {
+    uintptr_t slot_obj = sys_ptr(bsa + BSA_ACTION_SLOTS + (size_t)last_bsa_slot * 8u);
+    if (slot_obj && sys_mapped(slot_obj + BSA_SLOT_FLAGS, 1, SYS_PERM_R) &&
+        (*(const uint8_t *)(slot_obj + BSA_SLOT_FLAGS) & 2u))
+      return 3; /* mimics game's per-frame slot busy check */
+  }
+  if (last_bsa_slot == 0 && sys_mapped(bsa + BSA_CUR_VERB, 4, SYS_PERM_R | SYS_PERM_W))
+    memcpy((void *)(bsa + BSA_CUR_VERB), &last_bsa_verb, 4);
+  return 0;
+}
 
 /* Mock Warp & Eventskip */
 static bool sim_warp_pending, sim_warp_requested, sim_warp_abandoned;
@@ -2441,6 +2576,533 @@ static void test_bss_pool_and_error_reporting(void)
   puts("PASS: BSS pool, in-place save_buf shrinking, fallback promotion, coalescing, and non-OOM errors");
 }
 
+/* --- Test 15: Held actor (Banc Cucco + spawned pot) & Actor Blackboard WarpPos restore --- */
+
+static void test_held_actor_and_cucco_state(void)
+{
+  init_env(0x5B8);
+  test_build.version = "1.1.1";
+  test_build.actor_link_set = OFF_ACTOR_LINK_SET;
+  test_build.event_req_sub_dtor = OFF_ACTOR_LINK_DTOR;
+  test_build.lifter_drop = OFF_LIFTER_DROP;
+  test_build.lifter_force_lift = OFF_LIFTER_FORCE_LIFT;
+  test_build.player_lift_anim = OFF_PLAYER_LIFT_ANIM;
+  test_build.bsa_set_action_verb = OFF_BSA_SET_VERB;
+  memfile_fast_reload = true;
+  memfile_actors = true;
+  link_set_calls = link_dtor_calls = lifter_drop_calls = lifter_force_calls = lift_anim_calls = bsa_verb_calls = 0;
+  sim_spawn_calls = sim_spawn_cancel_calls = 0;
+  sim_spawn_result_actor = 0;
+
+  /* Link actor with PlayerComp (+0x358), PlayerLifterComponent (+0x2C8), BSAComponent (+0x188) */
+  static _Alignas(8) uint8_t link_act[0x400], link_comps[0x400], link_player[0x1A00], link_base[0x1A00];
+  static _Alignas(8) uint8_t link_lifter[0x300], link_bsa[0x240], link_handle_ent[0x60];
+  memset(link_act, 0, sizeof(link_act));
+  memset(link_comps, 0, sizeof(link_comps));
+  memset(link_player, 0, sizeof(link_player));
+  memset(link_base, 0, sizeof(link_base));
+  memset(link_lifter, 0, sizeof(link_lifter));
+  memset(link_bsa, 0, sizeof(link_bsa));
+  memset(link_handle_ent, 0, sizeof(link_handle_ent));
+
+  /* Banc Cucco actor with Actor Blackboard [[comps+0]+0x10] (NO AIComponent at comps+0x48!) + LiftableComponent */
+  static _Alignas(8) uint8_t amgr[0x80], ent_cucco[AENTRY_SIZE], pre_cucco[0x100];
+  static _Alignas(8) uint8_t cucco[0x540], cucco_comps[0x400], cucco_bb_comp[0x20], cucco_bb[BB_STRUCT_LEN];
+  static _Alignas(8) uint8_t cucco_liftable[0x300];
+  static const char cucco_name[] = "Animal_Cucco";
+  static const char cucco_pack[] = "Animal_Cucco";
+  static const char *vec_names[2] = { "LandingPos", "WarpPos" };
+  static const char *s32_names[1] = { "HitCount" };
+  static const char *bool_names[1] = { "IsSafeLandedFromDrown" };
+  static float bb_vecs[6] = { 10.0f, 20.0f, 30.0f, 111.0f, 222.0f, 333.0f };
+  static int32_t bb_s32[1] = { 2 };
+  static uint8_t bb_bools[1] = { 1 };
+  memset(amgr, 0, sizeof(amgr));
+  memset(ent_cucco, 0, sizeof(ent_cucco));
+  memset(pre_cucco, 0, sizeof(pre_cucco));
+  memset(cucco, 0, sizeof(cucco));
+  memset(cucco_comps, 0, sizeof(cucco_comps));
+  memset(cucco_bb_comp, 0, sizeof(cucco_bb_comp));
+  memset(cucco_bb, 0, sizeof(cucco_bb));
+  memset(cucco_liftable, 0, sizeof(cucco_liftable));
+
+  /* Wire Actor Blackboard tables */
+  uint32_t cnt1 = 1, cnt2 = 2;
+  uintptr_t p;
+  p = (uintptr_t)s32_names; memcpy(cucco_bb + 0x098, &cnt1, 4); memcpy(cucco_bb + 0x0A0, &p, 8);
+  p = (uintptr_t)bb_s32;    memcpy(cucco_bb + 0x0A8, &cnt1, 4); memcpy(cucco_bb + 0x0B0, &p, 8);
+  p = (uintptr_t)bool_names; memcpy(cucco_bb + 0x188, &cnt1, 4); memcpy(cucco_bb + 0x190, &p, 8);
+  p = (uintptr_t)bb_bools;   memcpy(cucco_bb + 0x198, &cnt1, 4); memcpy(cucco_bb + 0x1A0, &p, 8);
+  p = (uintptr_t)vec_names;  memcpy(cucco_bb + 0x200, &cnt2, 4); memcpy(cucco_bb + 0x208, &p, 8);
+  p = (uintptr_t)bb_vecs;    memcpy(cucco_bb + 0x210, &cnt2, 4); memcpy(cucco_bb + 0x218, &p, 8);
+  p = (uintptr_t)cucco_bb;   memcpy(cucco_bb_comp + 0x10, &p, 8);
+  p = (uintptr_t)cucco_bb_comp; memcpy(cucco_comps + 0x00, &p, 8);
+  p = (uintptr_t)cucco_liftable; memcpy(cucco_comps + ACOMP_LIFTABLE, &p, 8);
+
+  uint64_t cucco_id = 0x55AA123456789001ull;
+  memcpy(pre_cucco + PREACTOR_INSTANCE_ID, &cucco_id, 8);
+  p = (uintptr_t)cucco_name; memcpy(cucco + A_NAME, &p, 8);
+  p = (uintptr_t)cucco_pack; memcpy(cucco + 0x260, &p, 8);
+  uint32_t st4 = 4; memcpy(cucco + A_STATE, &st4, 4);
+  p = (uintptr_t)cucco_comps; memcpy(cucco + A_COMPONENTS, &p, 8);
+  p = (uintptr_t)pre_cucco;   memcpy(cucco + A_PREACTOR, &p, 8);
+  float cpos[3] = { 10.0f, 3.5f, 30.0f }, chome[3] = { 4.0f, 5.0f, 6.0f };
+  float crot[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+  memcpy(cucco + A_POS, cpos, 12);
+  memcpy(cucco + A_ROT, crot, 36);
+  memcpy(cucco + A_HOME_POS, chome, 12);
+
+  /* Put Cucco into ActorMgr tree */
+  p = (uintptr_t)cucco; memcpy(ent_cucco + AENTRY_ACTOR, &p, 8);
+  p = (uintptr_t)(ent_cucco + AENTRY_NODE); memcpy(amgr + AMGR_TREE_ROOT, &p, 8);
+  static uintptr_t amgr_slot;
+  amgr_slot = (uintptr_t)amgr;
+
+  /* Wire Link holding Cucco via PlayerLifterComponent */
+  p = (uintptr_t)link_comps;  memcpy(link_act + A_COMPONENTS, &p, 8);
+  p = (uintptr_t)link_base;   memcpy(link_comps + 0x2B8, &p, 8);
+  p = (uintptr_t)link_player; memcpy(link_comps + PLAYER_COMPONENT, &p, 8);
+  p = (uintptr_t)link_act;    memcpy(link_player + 0x18, &p, 8);
+  p = (uintptr_t)link_act;    memcpy(link_base + 0x1340, &p, 8);
+  p = (uintptr_t)link_lifter; memcpy(link_comps + ACOMP_LIFTER, &p, 8);
+  p = (uintptr_t)link_bsa;    memcpy(link_comps + ACOMP_BSA, &p, 8);
+  uint32_t gen = 7, lstate = 3;
+  p = (uintptr_t)cucco; memcpy(link_handle_ent + 0x40, &p, 8);
+  memcpy(link_handle_ent + 0x48, &gen, 4);
+  p = (uintptr_t)link_handle_ent; memcpy(link_lifter + LIFTER_TARGET_LINK + 8, &p, 8);
+  memcpy(link_lifter + LIFTER_TARGET_LINK + 0x10, &gen, 4);
+  memcpy(link_lifter + LIFTER_STATE, &lstate, 4);
+
+  sim_link_actor = (uintptr_t)link_act;
+  add_region(link_act, sizeof(link_act), SYS_PERM_R | SYS_PERM_W);
+  add_region(link_comps, sizeof(link_comps), SYS_PERM_R | SYS_PERM_W);
+  add_region(link_player, sizeof(link_player), SYS_PERM_R | SYS_PERM_W);
+  add_region(link_base, sizeof(link_base), SYS_PERM_R | SYS_PERM_W);
+  add_region(link_lifter, sizeof(link_lifter), SYS_PERM_R | SYS_PERM_W);
+  add_region(link_bsa, sizeof(link_bsa), SYS_PERM_R | SYS_PERM_W);
+  add_region(link_handle_ent, sizeof(link_handle_ent), SYS_PERM_R | SYS_PERM_W);
+  add_region(amgr, sizeof(amgr), SYS_PERM_R | SYS_PERM_W);
+  add_region(&amgr_slot, sizeof(amgr_slot), SYS_PERM_R | SYS_PERM_W);
+  add_region(ent_cucco, sizeof(ent_cucco), SYS_PERM_R | SYS_PERM_W);
+  add_region(pre_cucco, sizeof(pre_cucco), SYS_PERM_R | SYS_PERM_W);
+  add_region(cucco, sizeof(cucco), SYS_PERM_R | SYS_PERM_W);
+  add_region(cucco_comps, sizeof(cucco_comps), SYS_PERM_R | SYS_PERM_W);
+  add_region(cucco_bb_comp, sizeof(cucco_bb_comp), SYS_PERM_R | SYS_PERM_W);
+  add_region(cucco_bb, sizeof(cucco_bb), SYS_PERM_R | SYS_PERM_W);
+  add_region(cucco_liftable, sizeof(cucco_liftable), SYS_PERM_R | SYS_PERM_W);
+  add_region(cucco_name, sizeof(cucco_name) + 16, SYS_PERM_R);
+  add_region(cucco_pack, sizeof(cucco_pack) + 16, SYS_PERM_R);
+  add_region(vec_names, sizeof(vec_names), SYS_PERM_R);
+  add_region(s32_names, sizeof(s32_names), SYS_PERM_R);
+  add_region(bool_names, sizeof(bool_names), SYS_PERM_R);
+  add_region(bb_vecs, sizeof(bb_vecs), SYS_PERM_R | SYS_PERM_W);
+  add_region(bb_s32, sizeof(bb_s32), SYS_PERM_R | SYS_PERM_W);
+  add_region(bb_bools, sizeof(bb_bools), SYS_PERM_R | SYS_PERM_W);
+  test_build.actor_mgr_ptr = (uint32_t)((uintptr_t)&amgr_slot - z64hd_main);
+
+  /* Save slot 0 and export/import into slot 1 */
+  assert(memfile_save(0));
+  complete_mock_save(GD_SAVE_MAGIC, 256, "held_cucco");
+  memfile_frame();
+  assert(phase == L_IDLE && memfiles[0].held.valid);
+  assert(memfiles[0].held.instance_id == cucco_id);
+  assert(strcmp(memfiles[0].held.pack_name, "Animal_Cucco") == 0);
+  assert(memfiles[0].held.actor_bb != 0 && memfiles[0].held.actor_bb_size > 0);
+  assert(memfiles[0].held.flags & HELD_F_CUCCO);
+
+  sd_clear();
+  assert(memfile_export(0, "held_cucco_szm") && memfile_list_files() == 1 && memfile_import(0, 1));
+  assert(memfiles[1].held.valid && memfiles[1].held.instance_id == cucco_id);
+  assert(strcmp(memfiles[1].held.pack_name, "Animal_Cucco") == 0);
+  assert(memfiles[1].held.actor_bb_size == memfiles[0].held.actor_bb_size);
+
+  /* Corrupt WarpPos, HitCount, home_pos, and keep Link holding something before fast reload */
+  bb_vecs[3] = bb_vecs[4] = bb_vecs[5] = 0.0f;
+  bb_s32[0] = 0;
+  bb_bools[0] = 0;
+  float z3[3] = { 0, 0, 0 };
+  memcpy(cucco + A_HOME_POS, z3, 12);
+  *(uint32_t *)(link_player + PLAYER_LIFT_FLAGS) = 0;
+
+  assert(memfile_load(1));
+  complete_mock_load(true);
+  bool clobbered = false;
+  for (int i = 0; i < 60 && phase != L_IDLE; i++) {
+    memfile_frame();
+    if (phase == L_FAST_WAIT_RESET)
+      gd_set_bool(F_REQ_RESET_GIMMICK, false);
+    /* Simulate InterruptStruggle clobbering WarpPos on frame 1 post-bind -> held_reapply restores it */
+    if (!clobbered && lifter_force_calls == 1) {
+      bb_vecs[3] = -99.0f;
+      clobbered = true;
+    }
+  }
+  assert(phase == L_IDLE && clobbered);
+
+  assert(lifter_drop_calls == 1);
+  assert(link_set_calls == 1 && last_link_set_actor == (uintptr_t)cucco);
+  assert(lifter_force_calls == 1 && last_lift_target == (uintptr_t)cucco);
+  assert(lift_anim_calls == 1 && last_lift_anim_actor == (uintptr_t)cucco);
+  assert(link_dtor_calls == 1);
+  assert((*(uint32_t *)(link_player + PLAYER_LIFT_FLAGS) & 2u) != 0);
+  assert(bsa_verb_calls >= 1 && last_bsa_target == (uintptr_t)link_bsa &&
+         last_bsa_verb == ACTION_VERB_LIFT && last_bsa_slot == 1u);
+  assert(bb_vecs[3] == 111.0f && bb_vecs[4] == 222.0f && bb_vecs[5] == 333.0f);
+  assert(bb_s32[0] == 2 && bb_bools[0] == 1);
+  assert(memcmp(cucco + A_HOME_POS, chome, 12) == 0);
+
+  /* Now test dynamic / non-Banc held pot fallback -> spawns via actor_spawn_handle and binds */
+  static _Alignas(8) uint8_t pot[0x400], pot_comps[0x300], pot_liftable[0x300];
+  static const char pot_name[] = "Obj_Pot_A_01";
+  memset(pot, 0, sizeof(pot)); memset(pot_comps, 0, sizeof(pot_comps)); memset(pot_liftable, 0, sizeof(pot_liftable));
+  p = (uintptr_t)pot_name; memcpy(pot + A_NAME, &p, 8); memcpy(pot + 0x260, &p, 8);
+  memcpy(pot + A_STATE, &st4, 4);
+  p = (uintptr_t)pot_liftable; memcpy(pot_comps + ACOMP_LIFTABLE, &p, 8);
+  p = (uintptr_t)pot_comps;    memcpy(pot + A_COMPONENTS, &p, 8);
+  memcpy(pot + A_ROT, crot, 36);
+  add_region(pot, sizeof(pot), SYS_PERM_R | SYS_PERM_W);
+  add_region(pot_comps, sizeof(pot_comps), SYS_PERM_R | SYS_PERM_W);
+  add_region(pot_liftable, sizeof(pot_liftable), SYS_PERM_R | SYS_PERM_W);
+  add_region(pot_name, sizeof(pot_name) + 16, SYS_PERM_R);
+
+  /* Link holds non-Banc pot (no PreActor) */
+  p = (uintptr_t)pot; memcpy(link_handle_ent + 0x40, &p, 8);
+  memcpy(link_lifter + LIFTER_STATE, &lstate, 4);
+  assert(memfile_save(2));
+  complete_mock_save(GD_SAVE_MAGIC, 256, "held_pot");
+  memfile_frame();
+  assert(phase == L_IDLE && memfiles[2].held.valid && memfiles[2].held.instance_id == 0);
+  assert(strcmp(memfiles[2].held.pack_name, "Obj_Pot_A_01") == 0);
+
+  /* Clear tree and spawn the pot asynchronously during load */
+  sim_spawn_result_actor = (uintptr_t)pot;
+  sim_spawn_wait_frames = 2;
+  lifter_force_calls = 0;
+  assert(memfile_load(2));
+  complete_mock_load(true);
+  for (int i = 0; i < 60 && phase != L_IDLE; i++) {
+    memfile_frame();
+    if (phase == L_FAST_WAIT_RESET)
+      gd_set_bool(F_REQ_RESET_GIMMICK, false);
+  }
+  assert(phase == L_IDLE);
+  assert(sim_spawn_calls == 1 && strcmp(sim_spawn_last_name, "Obj_Pot_A_01") == 0);
+  assert(lifter_force_calls == 1 && last_lift_target == (uintptr_t)pot);
+
+  sd_clear();
+  clear_post_load_jobs();
+  for (int i = 0; i < MEMFILE_SLOTS; i++)
+    free_memfile(&memfiles[i]);
+  puts("PASS: held actor capture/restore (Banc Cucco + WarpPos + non-Banc pot spawn fallback + .szm)");
+}
+
+/* --- Test 16: Cucco drown timer, fade timer, respawn timer, and respawn position --- */
+
+static void test_cucco_drown_fade_respawn_timers(void)
+{
+  init_env(0x5B8);
+  test_build.version = "1.1.1";
+  test_build.bsa_set_action_verb = OFF_BSA_SET_VERB;
+  test_build.frame_counter_node_vtable = 0x100u; /* within z64hd_main */
+  memfile_fast_reload = true;
+  memfile_actors = true;
+  bsa_verb_calls = 0;
+
+  /* Fake AINB file for Kokko.action.interruptdrown.module */
+  static _Alignas(8) uint8_t aib_file[0x100];
+  memset(aib_file, 0, sizeof(aib_file));
+  memcpy(aib_file, "AIB ", 4);
+  uint32_t pool_off = 0x80u;
+  memcpy(aib_file + 0x24, &pool_off, 4);
+  strcpy((char *)(aib_file + 0x80), "Kokko.action.interruptdrown.module");
+
+  /* Two Cuccos:
+   *  C1: sinking/fading out (CUCCO_NODE_SINK=14, elapsed 22.5/60, alpha 0.35, WarpPos=(123,45,-67))
+   *  C2: mid-jump (CUCCO_NODE_JUMP=77, elapsed 48.0/600, JUMP_AIR=119 elapsed 4.5/10, LandingWaterCount=2) */
+  static _Alignas(8) uint8_t amgr[0x80], ent1[AENTRY_SIZE], ent2[AENTRY_SIZE];
+  static _Alignas(8) uint8_t pre1[0x100], pre2[0x100];
+  static _Alignas(8) uint8_t c1[0x540], c1_comps[0x400], c1_bb_c[0x20], c1_bb[BB_STRUCT_LEN];
+  static _Alignas(8) uint8_t c1_bsa[0x200], c1_hold[0xA0], c1_ctrl[0x220], c1_ctrl_bb[BB_STRUCT_LEN];
+  static _Alignas(8) uint8_t c1_def[0x20], c1_unit[0xA0], c1_model[0x150], c1_vis[0xC0];
+  static _Alignas(8) uint8_t c1_nodes_mem[6][0x60];
+  static uintptr_t c1_defs[1], c1_units[3], c1_node_ptrs[140];
+  static uint32_t  c1_bmp[5];
+
+  static _Alignas(8) uint8_t c2[0x540], c2_comps[0x400], c2_bsa[0x200], c2_hold[0xA0], c2_ctrl[0x220], c2_ctrl_bb[BB_STRUCT_LEN];
+  static _Alignas(8) uint8_t c2_unit[0xA0], c2_nodes_mem[6][0x60];
+  static uintptr_t c2_units[3], c2_node_ptrs[140];
+  static uint32_t  c2_bmp[5];
+
+  static const char cname[] = "Animal_Cucco";
+  static const char s_warp[] = "WarpPos";
+  static const char s_lwc[] = "LandingWaterCount";
+  static const char s_fw[] = "IsForceWarp";
+  static const char *warp_names[1] = { s_warp };
+  static const char *ctrl_s32_names[1] = { s_lwc };
+  static const char *ctrl_bool_names[1] = { s_fw };
+  static float c1_warp[3] = { 123.0f, 45.0f, -67.0f };
+  static int32_t c1_lwc[1] = { 3 }, c2_lwc[1] = { 2 };
+  static uint8_t c1_fw[1] = { 0 }, c2_fw[1] = { 0 };
+
+  memset(amgr, 0, sizeof(amgr)); memset(ent1, 0, sizeof(ent1)); memset(ent2, 0, sizeof(ent2));
+  memset(pre1, 0, sizeof(pre1)); memset(pre2, 0, sizeof(pre2));
+  memset(c1, 0, sizeof(c1)); memset(c1_comps, 0, sizeof(c1_comps)); memset(c1_bb_c, 0, sizeof(c1_bb_c));
+  memset(c1_bb, 0, sizeof(c1_bb)); memset(c1_bsa, 0, sizeof(c1_bsa)); memset(c1_hold, 0, sizeof(c1_hold));
+  memset(c1_ctrl, 0, sizeof(c1_ctrl)); memset(c1_ctrl_bb, 0, sizeof(c1_ctrl_bb));
+  memset(c1_def, 0, sizeof(c1_def)); memset(c1_unit, 0, sizeof(c1_unit));
+  memset(c1_model, 0, sizeof(c1_model)); memset(c1_vis, 0, sizeof(c1_vis));
+  memset(c1_nodes_mem, 0, sizeof(c1_nodes_mem)); memset(c1_node_ptrs, 0, sizeof(c1_node_ptrs)); memset(c1_bmp, 0, sizeof(c1_bmp));
+  memset(c2, 0, sizeof(c2)); memset(c2_comps, 0, sizeof(c2_comps)); memset(c2_bsa, 0, sizeof(c2_bsa));
+  memset(c2_hold, 0, sizeof(c2_hold)); memset(c2_ctrl, 0, sizeof(c2_ctrl)); memset(c2_ctrl_bb, 0, sizeof(c2_ctrl_bb));
+  memset(c2_unit, 0, sizeof(c2_unit)); memset(c2_nodes_mem, 0, sizeof(c2_nodes_mem));
+  memset(c2_node_ptrs, 0, sizeof(c2_node_ptrs)); memset(c2_bmp, 0, sizeof(c2_bmp));
+
+  uintptr_t p;
+  uint32_t cnt1 = 1, st4 = 4, n140 = 140, verb_drown = ACTION_VERB_DROWN;
+  uint64_t vt_fc = MAIN(test_build.frame_counter_node_vtable);
+  static const uint16_t idxs[6] = { CUCCO_NODE_IN_WATER, CUCCO_NODE_LOOK, CUCCO_NODE_JUMP,
+                                    CUCCO_NODE_JUMP_AIR, CUCCO_NODE_SINK, CUCCO_NODE_FADE_IN };
+
+  /* Shared def */
+  p = (uintptr_t)aib_file; memcpy(c1_def + 0x10, &p, 8);
+  c1_defs[0] = (uintptr_t)c1_def;
+
+  /* Wire C1 */
+  uint64_t id1 = 0xC0CC000000000001ull, id2 = 0xC0CC000000000002ull;
+  memcpy(pre1 + PREACTOR_INSTANCE_ID, &id1, 8);
+  memcpy(pre2 + PREACTOR_INSTANCE_ID, &id2, 8);
+  p = (uintptr_t)warp_names; memcpy(c1_bb + 0x200, &cnt1, 4); memcpy(c1_bb + 0x208, &p, 8);
+  p = (uintptr_t)c1_warp;    memcpy(c1_bb + 0x210, &cnt1, 4); memcpy(c1_bb + 0x218, &p, 8);
+  p = (uintptr_t)c1_bb;      memcpy(c1_bb_c + 0x10, &p, 8);
+  p = (uintptr_t)c1_bb_c;    memcpy(c1_comps + 0x00, &p, 8);
+  p = (uintptr_t)c1_vis;     memcpy(c1_comps + ACOMP_VIS, &p, 8);
+  p = (uintptr_t)c1_bsa;     memcpy(c1_comps + ACOMP_BSA, &p, 8);
+  p = (uintptr_t)c1_model;   memcpy(c1_comps + ACOMP_MODEL, &p, 8);
+  p = (uintptr_t)cname;      memcpy(c1 + A_NAME, &p, 8);
+  memcpy(c1 + A_STATE, &st4, 4);
+  p = (uintptr_t)c1_comps;   memcpy(c1 + A_COMPONENTS, &p, 8);
+  p = (uintptr_t)pre1;       memcpy(c1 + A_PREACTOR, &p, 8);
+  float c1_home[3] = { 1.0f, 2.0f, 3.0f }, rot_id[9] = { 1,0,0, 0,1,0, 0,0,1 };
+  memcpy(c1 + A_HOME_POS, c1_home, 12);
+  memcpy(c1 + A_ROT, rot_id, 36);
+
+  /* C1 model fade state: mid-fade out */
+  float alpha = 0.35f, step = 1.0f / 6.0f;
+  uint32_t fflags = 0xC8u;
+  memcpy(c1_model + MODEL_ALPHA, &alpha, 4);
+  memcpy(c1_model + MODEL_FADE_STEP, &step, 4);
+  memcpy(c1_model + MODEL_FADE_FLAGS, &fflags, 4);
+  c1_model[MODEL_FADE_ACTIVE] = 1;
+  c1_vis[VIS_FADE_FLAGS] = 0x04;
+
+  /* C1 BSA controller + unit + nodes */
+  memcpy(c1_bsa + BSA_CUR_VERB, &verb_drown, 4);
+  p = (uintptr_t)c1_hold; memcpy(c1_bsa + BSA_ACTION_HOLDER, &p, 8);
+  p = (uintptr_t)c1_ctrl; memcpy(c1_hold + 0x80, &p, 8);
+  p = (uintptr_t)c1;      memcpy(c1_ctrl + 0x1F0, &p, 8);
+  p = (uintptr_t)c1_ctrl_bb; memcpy(c1_ctrl + 0x1F8, &p, 8);
+  memcpy(c1_ctrl + 0x168, &cnt1, 4); p = (uintptr_t)c1_defs; memcpy(c1_ctrl + 0x170, &p, 8);
+  c1_units[0] = (uintptr_t)c1_unit;
+  memcpy(c1_ctrl + 0x18, &cnt1, 4); p = (uintptr_t)c1_units; memcpy(c1_ctrl + 0x20, &p, 8);
+  p = (uintptr_t)c1_def; memcpy(c1_unit + 0x10, &p, 8);
+  memcpy(c1_unit + 0x60, &n140, 4); p = (uintptr_t)c1_node_ptrs; memcpy(c1_unit + 0x68, &p, 8);
+  memcpy(c1_unit + 0x80, &n140, 4); p = (uintptr_t)c1_bmp; memcpy(c1_unit + 0x88, &p, 8);
+  p = (uintptr_t)ctrl_s32_names;  memcpy(c1_ctrl_bb + 0x098, &cnt1, 4); memcpy(c1_ctrl_bb + 0x0A0, &p, 8);
+  p = (uintptr_t)c1_lwc;          memcpy(c1_ctrl_bb + 0x0A8, &cnt1, 4); memcpy(c1_ctrl_bb + 0x0B0, &p, 8);
+  p = (uintptr_t)ctrl_bool_names; memcpy(c1_ctrl_bb + 0x188, &cnt1, 4); memcpy(c1_ctrl_bb + 0x190, &p, 8);
+  p = (uintptr_t)c1_fw;           memcpy(c1_ctrl_bb + 0x198, &cnt1, 4); memcpy(c1_ctrl_bb + 0x1A0, &p, 8);
+  for (int i = 0; i < 6; i++) {
+    uint8_t *nd = c1_nodes_mem[i];
+    memcpy(nd, &vt_fc, 8);
+    p = (uintptr_t)c1_unit; memcpy(nd + 8, &p, 8);
+    memcpy(nd + 0x1C, &idxs[i], 2);
+    nd[0x58] = 0;
+    c1_node_ptrs[idxs[i]] = (uintptr_t)nd;
+  }
+  /* Mark C1 node 14 (SINK) counting at 22.5 */
+  uint32_t nf_on = 2u; float sink_v = 22.5f;
+  memcpy(c1_nodes_mem[4] + 0x18, &nf_on, 4);
+  memcpy(c1_nodes_mem[4] + 0x20, &sink_v, 4);
+  c1_bmp[CUCCO_NODE_SINK >> 5] |= 1u << (CUCCO_NODE_SINK & 31);
+
+  /* Wire C2 (jumping, node 77 = 48.0, node 119 = 4.5, LandingWaterCount = 2) */
+  p = (uintptr_t)c2_bsa;   memcpy(c2_comps + ACOMP_BSA, &p, 8);
+  p = (uintptr_t)cname;    memcpy(c2 + A_NAME, &p, 8);
+  memcpy(c2 + A_STATE, &st4, 4);
+  p = (uintptr_t)c2_comps; memcpy(c2 + A_COMPONENTS, &p, 8);
+  p = (uintptr_t)pre2;     memcpy(c2 + A_PREACTOR, &p, 8);
+  memcpy(c2 + A_ROT, rot_id, 36);
+  memcpy(c2_bsa + BSA_CUR_VERB, &verb_drown, 4);
+  p = (uintptr_t)c2_hold; memcpy(c2_bsa + BSA_ACTION_HOLDER, &p, 8);
+  p = (uintptr_t)c2_ctrl; memcpy(c2_hold + 0x80, &p, 8);
+  p = (uintptr_t)c2;      memcpy(c2_ctrl + 0x1F0, &p, 8);
+  p = (uintptr_t)c2_ctrl_bb; memcpy(c2_ctrl + 0x1F8, &p, 8);
+  memcpy(c2_ctrl + 0x168, &cnt1, 4); p = (uintptr_t)c1_defs; memcpy(c2_ctrl + 0x170, &p, 8);
+  c2_units[0] = (uintptr_t)c2_unit;
+  memcpy(c2_ctrl + 0x18, &cnt1, 4); p = (uintptr_t)c2_units; memcpy(c2_ctrl + 0x20, &p, 8);
+  p = (uintptr_t)c1_def; memcpy(c2_unit + 0x10, &p, 8);
+  memcpy(c2_unit + 0x60, &n140, 4); p = (uintptr_t)c2_node_ptrs; memcpy(c2_unit + 0x68, &p, 8);
+  memcpy(c2_unit + 0x80, &n140, 4); p = (uintptr_t)c2_bmp; memcpy(c2_unit + 0x88, &p, 8);
+  p = (uintptr_t)ctrl_s32_names;  memcpy(c2_ctrl_bb + 0x098, &cnt1, 4); memcpy(c2_ctrl_bb + 0x0A0, &p, 8);
+  p = (uintptr_t)c2_lwc;          memcpy(c2_ctrl_bb + 0x0A8, &cnt1, 4); memcpy(c2_ctrl_bb + 0x0B0, &p, 8);
+  p = (uintptr_t)ctrl_bool_names; memcpy(c2_ctrl_bb + 0x188, &cnt1, 4); memcpy(c2_ctrl_bb + 0x190, &p, 8);
+  p = (uintptr_t)c2_fw;           memcpy(c2_ctrl_bb + 0x198, &cnt1, 4); memcpy(c2_ctrl_bb + 0x1A0, &p, 8);
+  for (int i = 0; i < 6; i++) {
+    uint8_t *nd = c2_nodes_mem[i];
+    memcpy(nd, &vt_fc, 8);
+    p = (uintptr_t)c2_unit; memcpy(nd + 8, &p, 8);
+    memcpy(nd + 0x1C, &idxs[i], 2);
+    nd[0x58] = 0;
+    c2_node_ptrs[idxs[i]] = (uintptr_t)nd;
+  }
+  float jmp_v = 48.0f, air_v = 4.5f;
+  memcpy(c2_nodes_mem[2] + 0x18, &nf_on, 4); memcpy(c2_nodes_mem[2] + 0x20, &jmp_v, 4);
+  memcpy(c2_nodes_mem[3] + 0x18, &nf_on, 4); memcpy(c2_nodes_mem[3] + 0x20, &air_v, 4);
+  c2_bmp[CUCCO_NODE_JUMP >> 5] |= 1u << (CUCCO_NODE_JUMP & 31);
+  c2_bmp[CUCCO_NODE_JUMP_AIR >> 5] |= 1u << (CUCCO_NODE_JUMP_AIR & 31);
+
+  /* Put both Cuccos in ActorMgr tree */
+  p = (uintptr_t)c1; memcpy(ent1 + AENTRY_ACTOR, &p, 8);
+  p = (uintptr_t)c2; memcpy(ent2 + AENTRY_ACTOR, &p, 8);
+  p = (uintptr_t)(ent2 + AENTRY_NODE); memcpy(ent1 + AENTRY_NODE + ANODE_RIGHT, &p, 8);
+  p = (uintptr_t)(ent1 + AENTRY_NODE); memcpy(amgr + AMGR_TREE_ROOT, &p, 8);
+  static uintptr_t amgr_slot2;
+  amgr_slot2 = (uintptr_t)amgr;
+
+  add_region(aib_file, sizeof(aib_file), SYS_PERM_R);
+  add_region(amgr, sizeof(amgr), SYS_PERM_R | SYS_PERM_W);
+  add_region(&amgr_slot2, sizeof(amgr_slot2), SYS_PERM_R | SYS_PERM_W);
+  add_region(ent1, sizeof(ent1), SYS_PERM_R | SYS_PERM_W);
+  add_region(ent2, sizeof(ent2), SYS_PERM_R | SYS_PERM_W);
+  add_region(pre1, sizeof(pre1), SYS_PERM_R | SYS_PERM_W);
+  add_region(pre2, sizeof(pre2), SYS_PERM_R | SYS_PERM_W);
+  add_region(c1, sizeof(c1), SYS_PERM_R | SYS_PERM_W);
+  add_region(c1_comps, sizeof(c1_comps), SYS_PERM_R | SYS_PERM_W);
+  add_region(c1_bb_c, sizeof(c1_bb_c), SYS_PERM_R | SYS_PERM_W);
+  add_region(c1_bb, sizeof(c1_bb), SYS_PERM_R | SYS_PERM_W);
+  add_region(c1_bsa, sizeof(c1_bsa), SYS_PERM_R | SYS_PERM_W);
+  add_region(c1_hold, sizeof(c1_hold), SYS_PERM_R | SYS_PERM_W);
+  add_region(c1_ctrl, sizeof(c1_ctrl), SYS_PERM_R | SYS_PERM_W);
+  add_region(c1_ctrl_bb, sizeof(c1_ctrl_bb), SYS_PERM_R | SYS_PERM_W);
+  add_region(c1_def, sizeof(c1_def), SYS_PERM_R);
+  add_region(c1_defs, sizeof(c1_defs), SYS_PERM_R);
+  add_region(c1_units, sizeof(c1_units), SYS_PERM_R);
+  add_region(c1_unit, sizeof(c1_unit), SYS_PERM_R | SYS_PERM_W);
+  add_region(c1_node_ptrs, sizeof(c1_node_ptrs), SYS_PERM_R | SYS_PERM_W);
+  add_region(c1_bmp, sizeof(c1_bmp), SYS_PERM_R | SYS_PERM_W);
+  add_region(c1_nodes_mem, sizeof(c1_nodes_mem), SYS_PERM_R | SYS_PERM_W);
+  add_region(c1_model, sizeof(c1_model), SYS_PERM_R | SYS_PERM_W);
+  add_region(c1_vis, sizeof(c1_vis), SYS_PERM_R | SYS_PERM_W);
+  add_region(c2, sizeof(c2), SYS_PERM_R | SYS_PERM_W);
+  add_region(c2_comps, sizeof(c2_comps), SYS_PERM_R | SYS_PERM_W);
+  add_region(c2_bsa, sizeof(c2_bsa), SYS_PERM_R | SYS_PERM_W);
+  add_region(c2_hold, sizeof(c2_hold), SYS_PERM_R | SYS_PERM_W);
+  add_region(c2_ctrl, sizeof(c2_ctrl), SYS_PERM_R | SYS_PERM_W);
+  add_region(c2_ctrl_bb, sizeof(c2_ctrl_bb), SYS_PERM_R | SYS_PERM_W);
+  add_region(c2_units, sizeof(c2_units), SYS_PERM_R);
+  add_region(c2_unit, sizeof(c2_unit), SYS_PERM_R | SYS_PERM_W);
+  add_region(c2_node_ptrs, sizeof(c2_node_ptrs), SYS_PERM_R | SYS_PERM_W);
+  add_region(c2_bmp, sizeof(c2_bmp), SYS_PERM_R | SYS_PERM_W);
+  add_region(c2_nodes_mem, sizeof(c2_nodes_mem), SYS_PERM_R | SYS_PERM_W);
+  add_region(cname, sizeof(cname) + 16, SYS_PERM_R);
+  add_region(s_warp, sizeof(s_warp), SYS_PERM_R);
+  add_region(s_lwc, sizeof(s_lwc), SYS_PERM_R);
+  add_region(s_fw, sizeof(s_fw), SYS_PERM_R);
+  add_region(warp_names, sizeof(warp_names), SYS_PERM_R);
+  add_region(ctrl_s32_names, sizeof(ctrl_s32_names), SYS_PERM_R);
+  add_region(ctrl_bool_names, sizeof(ctrl_bool_names), SYS_PERM_R);
+  add_region(c1_warp, sizeof(c1_warp), SYS_PERM_R | SYS_PERM_W);
+  add_region(c1_lwc, sizeof(c1_lwc), SYS_PERM_R | SYS_PERM_W);
+  add_region(c2_lwc, sizeof(c2_lwc), SYS_PERM_R | SYS_PERM_W);
+  add_region(c1_fw, sizeof(c1_fw), SYS_PERM_R | SYS_PERM_W);
+  add_region(c2_fw, sizeof(c2_fw), SYS_PERM_R | SYS_PERM_W);
+  test_build.actor_mgr_ptr = (uint32_t)((uintptr_t)&amgr_slot2 - z64hd_main);
+
+  /* Save slot 0 and export/import into slot 1 */
+  assert(memfile_save(0));
+  complete_mock_save(GD_SAVE_MAGIC, 256, "cucco_drown");
+  memfile_frame();
+  assert(phase == L_IDLE && memfiles[0].cucco_count == 2);
+  sd_clear();
+  assert(memfile_export(0, "cucco_drown_szm") && memfile_list_files() == 1 && memfile_import(0, 1));
+  assert(memfiles[1].cucco_count == 2);
+
+  /* Reset both Cuccos to fresh non-drowning state before reload */
+  uint32_t zero32 = 0; float one = 1.0f, zero_f = 0.0f;
+  memcpy(c1_bsa + BSA_CUR_VERB, &zero32, 4);
+  memcpy(c2_bsa + BSA_CUR_VERB, &zero32, 4);
+  memset(c1_bmp, 0, sizeof(c1_bmp)); memset(c2_bmp, 0, sizeof(c2_bmp));
+  for (int i = 0; i < 6; i++) {
+    memcpy(c1_nodes_mem[i] + 0x18, &zero32, 4); memcpy(c1_nodes_mem[i] + 0x20, &zero_f, 4);
+    memcpy(c2_nodes_mem[i] + 0x18, &zero32, 4); memcpy(c2_nodes_mem[i] + 0x20, &zero_f, 4);
+  }
+  memcpy(c1_model + MODEL_ALPHA, &one, 4);
+  memcpy(c1_model + MODEL_FADE_FLAGS, &zero32, 4);
+  c1_model[MODEL_FADE_ACTIVE] = 0;
+  c1_vis[VIS_FADE_FLAGS] = 0;
+  c1_warp[0] = c1_warp[1] = c1_warp[2] = 0.0f;
+  c1_lwc[0] = 0; c2_lwc[0] = 0; c1_fw[0] = 0; c2_fw[0] = 0;
+  memset(c1 + A_HOME_POS, 0, 12);
+
+  assert(memfile_load(1));
+  complete_mock_load(true);
+  for (int i = 0; i < 40; i++) {
+    memfile_frame();
+    if (phase == L_FAST_WAIT_RESET)
+      gd_set_bool(F_REQ_RESET_GIMMICK, false);
+    /* Simulate Cucco 1 entering InterruptDrown -> IsForceWarp sends it straight to SINK (14) */
+    if (*(uint32_t *)(c1_bsa + BSA_CUR_VERB) == ACTION_VERB_DROWN &&
+        !(c1_bmp[CUCCO_NODE_SINK >> 5] & (1u << (CUCCO_NODE_SINK & 31)))) {
+      c1_bmp[CUCCO_NODE_SINK >> 5] |= 1u << (CUCCO_NODE_SINK & 31);
+      memcpy(c1_nodes_mem[4] + 0x18, &nf_on, 4);
+    }
+    /* Simulate Cucco 2 advancing 35 -> 125 -> 77 + 119 as step_drown_job fast-forwards each counter */
+    if (*(uint32_t *)(c2_bsa + BSA_CUR_VERB) == ACTION_VERB_DROWN) {
+      if (!(c2_bmp[CUCCO_NODE_IN_WATER >> 5] & (1u << (CUCCO_NODE_IN_WATER & 31))) &&
+          !(c2_bmp[CUCCO_NODE_LOOK >> 5] & (1u << (CUCCO_NODE_LOOK & 31))) &&
+          !(c2_bmp[CUCCO_NODE_JUMP >> 5] & (1u << (CUCCO_NODE_JUMP & 31)))) {
+        c2_bmp[CUCCO_NODE_IN_WATER >> 5] |= 1u << (CUCCO_NODE_IN_WATER & 31);
+        memcpy(c2_nodes_mem[0] + 0x18, &nf_on, 4);
+      } else if ((c2_bmp[CUCCO_NODE_IN_WATER >> 5] & (1u << (CUCCO_NODE_IN_WATER & 31))) &&
+                 *(float *)(c2_nodes_mem[0] + 0x20) >= 30.0f) {
+        c2_bmp[CUCCO_NODE_IN_WATER >> 5] &= ~(1u << (CUCCO_NODE_IN_WATER & 31));
+        c2_bmp[CUCCO_NODE_LOOK >> 5] |= 1u << (CUCCO_NODE_LOOK & 31);
+        memcpy(c2_nodes_mem[1] + 0x18, &nf_on, 4);
+      } else if ((c2_bmp[CUCCO_NODE_LOOK >> 5] & (1u << (CUCCO_NODE_LOOK & 31))) &&
+                 *(float *)(c2_nodes_mem[1] + 0x20) >= 120.0f) {
+        c2_bmp[CUCCO_NODE_LOOK >> 5] &= ~(1u << (CUCCO_NODE_LOOK & 31));
+        c2_bmp[CUCCO_NODE_JUMP >> 5] |= 1u << (CUCCO_NODE_JUMP & 31);
+        c2_bmp[CUCCO_NODE_JUMP_AIR >> 5] |= 1u << (CUCCO_NODE_JUMP_AIR & 31);
+        memcpy(c2_nodes_mem[2] + 0x18, &nf_on, 4);
+        memcpy(c2_nodes_mem[3] + 0x18, &nf_on, 4);
+      }
+    }
+  }
+  assert(phase == L_IDLE);
+
+  /* Verify C1: respawn pos (WarpPos + home), respawn timer (node 14), fade timer (ModelComponent) */
+  assert(c1_warp[0] == 123.0f && c1_warp[1] == 45.0f && c1_warp[2] == -67.0f);
+  assert(memcmp(c1 + A_HOME_POS, c1_home, 12) == 0);
+  assert(c1_fw[0] == 1 && c1_lwc[0] == 4);
+  assert(*(float *)(c1_nodes_mem[4] + 0x20) == 22.5f);
+  assert(*(float *)(c1_model + MODEL_ALPHA) == 0.35f);
+  assert(fabsf(*(float *)(c1_model + MODEL_FADE_STEP) - (1.0f / 6.0f)) < 1e-5f);
+  assert((*(uint32_t *)(c1_model + MODEL_FADE_FLAGS) & 0xC8u) == 0xC8u);
+  assert(c1_model[MODEL_FADE_ACTIVE] == 1 && c1_vis[VIS_FADE_FLAGS] == 0x04);
+
+  /* Verify C2: drown timer fast-forwarded 35 -> 125 -> 77 + 119 + LandingWaterCount */
+  assert(c2_lwc[0] == 2);
+  assert(*(float *)(c2_nodes_mem[2] + 0x20) == 48.0f);
+  assert(*(float *)(c2_nodes_mem[3] + 0x20) == 4.5f);
+
+  sd_clear();
+  clear_post_load_jobs();
+  for (int i = 0; i < MEMFILE_SLOTS; i++)
+    free_memfile(&memfiles[i]);
+  assert(pool_free_bytes() == MEMFILE_POOL_SIZE - sizeof(pool_hdr_t));
+  puts("PASS: Cucco respawn pos (WarpPos/home), respawn timer, fade timer, drown timer + .szm round-trip");
+}
+
 int main(void)
 {
   test_async_save_and_staging();
@@ -2457,5 +3119,7 @@ int main(void)
   test_phase2_bb_vel_savepos();
   test_phase3_rng_mgrs_cutscene();
   test_bss_pool_and_error_reporting();
+  test_held_actor_and_cucco_state();
+  test_cucco_drown_fade_respawn_timers();
   return 0;
 }

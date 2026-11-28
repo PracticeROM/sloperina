@@ -606,6 +606,7 @@ const char *actor_pack_name(uintptr_t actor)
  * BYML of romfs/Banc/<map>/<layout>_{Static,Dynamic}.bcett.byml): +0xB0 its Dynamic dictionary, as the file's start
  * (u64) then the node's offset in it (u32) and its type (u32, 0xC1 a dictionary); +0xC0 its Phive the same. */
 #define ACTOR_PREACTOR 0x3D8
+#define PRE_INSTANCE_ID 0x88
 #define PRE_DYNAMIC 0xB0
 #define BYML_MAGIC 0x4259 /* "YB": little-endian */
 #define BYML_DICT 0xC1
@@ -634,6 +635,53 @@ static bool byml_string(uintptr_t table, uint32_t i, char *out, int len)
   }
   out[len - 1] = 0;
   return true;
+}
+
+bool actor_instance_id(uintptr_t actor, uint64_t *id_out)
+{
+  if (!actor || !readable(actor + ACTOR_PREACTOR, 8))
+    return false;
+  uintptr_t pre = sys_ptr(actor + ACTOR_PREACTOR);
+  if (!pre || (pre & 7) || !sys_mapped(pre + PRE_INSTANCE_ID, 8, SYS_PERM_R))
+    return false;
+  uint64_t id = 0;
+  memcpy(&id, (const void *)(pre + PRE_INSTANCE_ID), sizeof(id));
+  if (!id || id == UINT64_MAX || id == 0xFFFFFFFFull)
+    return false;
+  *id_out = id;
+  return true;
+}
+
+static struct {
+  uint64_t want;
+  uintptr_t found;
+} find_inst;
+
+static void find_inst_cb(uintptr_t actor)
+{
+  if (find_inst.found || !readable(actor, ACTOR_PREACTOR + 8))
+    return;
+  uint32_t state = *(uint32_t *)(actor + ACTOR_STATE);
+  if (state < STATE_RUNNING || state > STATE_RUNNING_LAST)
+    return;
+  uint64_t id = 0;
+  if (actor_instance_id(actor, &id) && id == find_inst.want)
+    find_inst.found = actor;
+}
+
+uintptr_t actor_find_instance(uint64_t instance_id)
+{
+  if (!instance_id || !z64hd_game || !z64hd_game->actor_mgr_ptr)
+    return 0;
+  uintptr_t mgr = sys_ptr(MAIN(z64hd_game->actor_mgr_ptr));
+  if (!readable(mgr + MGR_TREE_ROOT, 8))
+    return 0;
+  find_inst.want = instance_id;
+  find_inst.found = 0;
+  walk.visits = 0;
+  walk.visit = find_inst_cb;
+  walk_tree(*(uintptr_t *)(mgr + MGR_TREE_ROOT));
+  return find_inst.found;
 }
 
 bool actor_layout_string(uintptr_t actor, const char *key, char *out, int len)

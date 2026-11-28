@@ -1783,7 +1783,8 @@ and **safety flags** watches read it (`safety.c`).
   ClimbLadder 71 (checked in game; after letting go it reads 32 then 0).
 - `ExecuteBSASetActionVerb` (vtable `main+0x491A0F8`, enter `main+0x25DC2C0` [`0x262C160`]) builds a `0x60`-byte request
   and calls `main+0x93440(bsa, request, 1)` [`0xC08F0`]: NaN at `+0x0/+0xC/+0x18/+0x2C/+0x30`, `u32` `4` at `+0x24` and
-  `0x11A` at `+0x28`, `0x10` at `+0x34`, optional variation at `+0x38`/`+0x40`, verb `+0x48`, action slot `+0x4C`, flags
+  `0x11A` at `+0x28`, `0x10` at `+0x34`, optional variation at `+0x38`/`+0x40`, action slot `+0x48` (`0..4`: `0` main
+  `[bsa+0x1C0]`, `1` weapon/sub `[bsa+0x1C8]`), verb `+0x4C`, flags
   `u16` `+0x50` (bit 0 and `0x100`: the two force booleans; `0x400` skips the controller at `[bsa+0x3C68]`), requester
   node `+0x58` (the game itself sends some with none, `main+0x973EC`). Generic builder: `main+0x2AFB200`.
 - Schedulers (`Player.scheduler.*.module.ainb` in `Player_Base.pack`) choose the next verb from the current action;
@@ -2729,3 +2730,60 @@ Player packs) runs `ExecutePlayerReactionPreAbyss` and the event `DmF_SY_FallDow
 - So (drownview.c): the actor browser's **drown timer watches** read these counters (the one changing is the step it's
   at; what's left divided by how much it changes a frame): **drown timer** until the fade starts, **fade timer**,
   **respawn in** until it's put back. **respawn point** draws WarpPos, home or the last landing.
+
+### 9.48 Held actors (Lifter / Liftable), ModelComponent alpha fade, and Cucco drown restore (1.1.1; 1.0.0 in brackets; disassembly verified)
+- **Lifter & Liftable components:** Link's `PlayerLifterComponent` is `[[link+0x270]+0x2C8]` (vtable `main+0x4B4E6C8`,
+  base `LifterComponent` `0x4B4C648`); a liftable actor's `LiftableComponent` is `[[actor+0x270]+0x2C0]`.
+  - `lifter+0x2B0` (`u32`): state (`0` Nothing, `1` Setup, `2` BindWithLiftable, `3` OnlyLifting; `(s & ~1) == 2` is
+    actively holding). `lifter+0x1A8`: 32-byte `ActorLink` holder whose inner 24-byte `ActorLink` starts at
+    `lifter+0x1B0` (`entry` at `+0x1B8`, `gen` at `+0x1C0`, same layout as §9.19 handles).
+  - `liftable+0x2C` (`u32`, mask `0x11C` bound states), `liftable+0xC0` (`ActorLink` back to Link), `liftable+0x276`
+    bit 2 (liftable enabled).
+  - Native lift functions (matched in both builds):
+    - `ActorLink::set(link, actor, flags)` `main+0xBC960` [`0xE4CE0`] (init with vtable `event_req_sub_vt + 0x10`,
+      `+0x10 = 0x1FFFFFFFF`; destructor `event_req_sub_dtor`).
+    - `LifterComponent::drop(lifter, reason, s0, s1)` `main+0x2E50DB0` [`0x2DFC500`].
+    - `LifterComponent::forceLift(lifter, link, &key, flag)` `main+0x2E50E40` [`0x2DFC590`]: checks `canLift`
+      (`0x2E50570` — requires lifter state 0, target running state 4/5, non-null LiftableComponent; no distance check),
+      jumps straight to state `3` (`OnlyLifting`), binds `lifter+0x1A8`, and sends bind message `0x7A890000` to target.
+    - `player_lift_anim(link_actor, link)` `main+0x30185B0` [`0x2FC3780`]: updates Link's lift animation params for the
+      held actor's `LiftableType`.
+- **Skipping pickup animation (`ExecutePlayerLift` & `SelectorPlayerSubSchedulerMain`):**
+  - `ActionVerb` string table starts at `main+0x4B4ABC8` (`0` = `None`): `PreLift` `0x2A` (42), `Lift` `0x2B` (43),
+    `InterruptDrown` `0x9D` (157), `InterruptStruggle` `0x9E` (158), `HoldItem` `0xED` (237).
+  - `SelectorPlayerSubSchedulerMain` (`main+0x2B435B0`, init `0x11EEBF0`): routes verb `0x2B` (`Lift`, weapon/sub
+    slot 1 at `[bsa+0x1C8]`) to `Player.sub.scheduler.lift` / `Player.sub.action.lift` (`ExecutePlayerLift`), whereas
+    `0xED` (`HoldItem`) routes to `Player.sub.action.holditem` (inventory items in right hand).
+  - `BSAComponent::setActionVerb` returns `0` on success and `3` if `[slot+0x7C]` bit 1 (`0x02`) is already set
+    ("request already submitted this frame"); clearing bit 1 before submitting overrides an earlier scheduler request
+    on the same frame.
+  - `ExecutePlayerLift::enter` (`main+0x27E4FF0` [`0x2793440`]): when `player_comp+0xE40` bit 1 (`#2`) is set, skips
+    the pickup animation and enters state `3` (already holding, `0x27E58F0`).
+- **Actor Blackboard vs AIComponent Blackboard & Cucco `InterruptStruggle`:**
+  - BSA-only actors (Cuccos, Epona) have `comps+0x48 == NULL`; their Actor Blackboard is `[[comps+0x00]+0x10]` with the
+    same typed table layout (`S32` `0x0A8/0x0B0`, `F32` `0x120/0x128`, `Bool` `0x198/0x1A0`, `Vec3f` `0x210/0x218`,
+    `U32` `0x558/0x560`; name count/ptr at `count_off - 0x10` / `-0x08`).
+  - `Kokko.action.interruptstruggle.module` runs while Link holds a Cucco (`QueryLiftableIsBindState`) and updates
+    Actor Blackboard `WarpPos`, `LandingPos`, and `IsSafeLandedFromDrown` from `QueryLiftableGetLifterLandingInfo`
+    whenever Link is on safe ground.
+- **Cucco `InterruptDrown` unit internals & `ModelComponent` alpha fade:**
+  - `AIControllerUnit`: `unit+0x60` (`u32`) node count, `unit+0x68` (`Node**`) array indexed by node index; `unit+0x80`
+    (`u32`) bit count, `unit+0x88` (`u32*`) active-node bitmap (cleared by node leave `main+0x37ABB30`).
+  - `SelectorGenericFrameCounter::calc_` (`main+0x9A76D0`): active while `(node+0x18 & 2)` and `*(u8*)(node+0x1E) ==
+    *(u8*)(node+0x58)`, adding frame step to `*(float*)(node+0x20)`.
+  - `Kokko.action.interruptdrown.module` keeps `LandingWaterCount` (S32, jump count `0..3`) and `IsForceWarp` (Bool;
+    checked at node `123` to jump straight to fade-out + `CUCCO_SINK` node `14`) in the BSA action controller's own
+    blackboard `[ctrl+0x1F8]` (`BlackboardType = 0`).
+  - `ModelComponent` (`[comps+0x260]`) alpha fade update (`main+0x2E1EB10` [`0x2DCA4xx`]; identical offsets in 1.0.0):
+    `+0x80` current alpha (`0..1`), `+0x84` previous alpha, `+0x11C` step (`1/FadeFrame`, default `1/6`), `+0x120`
+    dirty flags (`0x2500` refreshes renderer), `+0x128` fade flags (bit 2 fade-in, bit 3 fade-out, bits 6–7 sync `+0x84`,
+    bit 14 hide at 0), `+0x134` (`u8`) fade-out active, `[[comps+0x10]+0xB0]` (`u8`: bit 2 fading, bit 4 hidden, bit 5
+    done).
+- **Teleporting distant / LOD-paused actors (`PhysicsComponent::forceSetPosAndRot` `main+0x4C6630` [`0x665790`]):**
+  - `forceSetPosAndRot` writes the new 3×4 matrix into `[phys+0x20]+0x1D0` (setting dirty bits `[phys+0x20]+0x228 |= 3`)
+    and calls CCT `setPos`, but **does not write `actor+0x31C` (`A_POS`) or `actor+0x328` (`A_ROT`) directly**.
+  - Actors with `LODParam` `UsePhysicsPause: True`, `CalcSkipRescueDistance: 50.0` (`NpcCommon`), and
+    `IsPhysicsPauseDuringActorPause: True` (`Animal_Cucco_CatchCucco`) stay paused (`state = 5`) when far from Link
+    (e.g. a Kakariko Cucco on the surface ~71 m from the underground grotto), so their physics-to-actor sync never runs
+    if `A_POS` isn't also updated immediately. Writing `A_POS`/`A_ROT` alongside `forceSetPosAndRot` lets LOD wake the
+    actor (`state 5 -> 4`) within ~2 frames so `L_ACTORS` and `L_HELD` work cleanly in grottos too.

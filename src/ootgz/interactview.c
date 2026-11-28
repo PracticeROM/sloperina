@@ -24,6 +24,7 @@
 #include "guardview.h" /* bone matrices */
 #include "lang.h"
 #include "link.h"
+#include "memfile.h" /* memfile_loading */
 #include "placer.h" /* the actor browser: its spot and actor */
 #include "sys.h"
 #include "z64hd.h"
@@ -200,7 +201,10 @@ bool interactview_is_door(uintptr_t actor)
 
 static float absf(float v) { return v < 0 ? -v : v; }
 
+#define DOOR_REBIND_FRAMES 60
 static uintptr_t watched_door, door_hint;
+static uint64_t watched_door_id;
+static int watched_door_rebind;
 static uintptr_t scan_at, scan_start, scan_heap_lo, scan_heap_hi, scan_region_end;
 static bool scan_wrapped;
 static struct {
@@ -453,11 +457,15 @@ static uintptr_t searched_door(void) { return close_door ? close_door : watched_
 
 void interactview_door_watch(uintptr_t door)
 {
-  if (door == watched_door)
+  if (door == watched_door && (!door || watched_door_rebind == 0))
     return;
   watched_door = door;
-  if (door)
-    log_printf("door close watch: %#lx", (unsigned long)door);
+  watched_door_id = 0;
+  watched_door_rebind = 0;
+  if (door) {
+    actor_instance_id(door, &watched_door_id);
+    log_printf("door close watch: %#lx (id %#lx)", (unsigned long)door, (unsigned long)watched_door_id);
+  }
 }
 
 uintptr_t interactview_door_watched(void) { return watched_door; }
@@ -596,9 +604,25 @@ static void close_release(void)
 static void door_frame(void)
 {
   open_step();
+  static bool was_loading;
+  bool loading = memfile_loading();
+  bool in_load = loading || was_loading;
+  if (!watched_door && watched_door_id && !loading) {
+    uintptr_t rebound = actor_find_instance(watched_door_id);
+    if (rebound && interactview_is_door(rebound)) {
+      watched_door = rebound;
+      watched_door_rebind = 0;
+      n_door_nodes = 0, nodes_door = 0, n_door_ctrls = 0;
+      log_printf("door close watch: rebound %#lx (id %#lx)", (unsigned long)rebound, (unsigned long)watched_door_id);
+    } else if (--watched_door_rebind <= 0) {
+      watched_door_id = 0;
+      watched_door_rebind = 0;
+    }
+  }
   uintptr_t door = searched_door();
   if (!door) {
     n_door_nodes = 0, nodes_door = 0;
+    was_loading = loading;
     return;
   }
   actor_read_t a;
@@ -606,10 +630,16 @@ static void door_frame(void)
     n_held = 0, n_door_nodes = 0, nodes_door = 0;
     if (door == close_door)
       close_door = 0;
-    else
+    else if (in_load && watched_door_id) {
+      watched_door = 0;
+      watched_door_rebind = DOOR_REBIND_FRAMES;
+    } else {
       interactview_door_watch(0);
+    }
+    was_loading = loading;
     return;
   }
+  was_loading = loading;
   if (nodes_door != door) {
     n_door_nodes = 0, nodes_door = door, n_door_ctrls = 0;
     scan_restart();
