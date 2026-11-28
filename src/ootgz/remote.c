@@ -2087,6 +2087,25 @@ static void run_line(char *line, bool held)
       result(false, "list: %s", problem);
     else
       list_menu(item ? item->submenu : menu);
+  } else if (same(verb, "menu")) {
+    /* what the menu on screen shows: where it is and which item the cursor is on */
+    if (!menu_current)
+      result(true, "menu closed");
+    else {
+      char path[200] = "", line[160] = "";
+      const menu_t *chain[8];
+      int depth = 0;
+      for (const menu_t *m = menu_current; m && m->parent && depth < 8; m = m->parent)
+        chain[depth++] = m; /* the top menu has no name in a path */
+      for (int i = depth - 1, at = 0; i >= 0 && at < (int)sizeof(path) - 1; i--)
+        at += snprintf(path + at, sizeof(path) - (size_t)at, "%s%s", at ? "/" : "", chain[i]->title);
+      menu_t *m = menu_current;
+      bool on_item = m->selected >= 0 && m->selected < m->n_items;
+      if (on_item)
+        menu_item_line(&m->items[m->selected], line, sizeof(line));
+      result(true, "menu open path=[%s] cursor=@%d kind=%s editing=%d line=[%s]", path, m->selected,
+             on_item ? kind_names[m->items[m->selected].kind] : "-", menu_editing != 0, line);
+    }
   } else if (same(verb, "open")) {
     /* the menu on screen at that menu, or at that item of its menu (for a look at it) */
     problem = resolve(args, &menu, &item);

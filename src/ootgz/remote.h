@@ -13,6 +13,9 @@
  *   get <menu path>            its value and its line as the menu shows it
  *   list [<menu path>]         a menu's items: number, kind, name, value
  *   open [<menu path>]         the menu on screen at that menu (or at that item of its menu), for a look at it
+ *   menu                       what the menu on screen shows: "menu closed", or "menu open path=[<menu path>]
+ *                              cursor=@<item number> kind=<its kind> editing=<0|1> line=[<its line>]": for a
+ *                              tool that presses the menu's buttons and wants to know where they took it
  *   wait <frames>              the next line runs that many frames later (ended, with an error, if the game is
  *                              held meanwhile: no frames pass then)
  *   wait until <condition> [max <frames>]

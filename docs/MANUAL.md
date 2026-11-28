@@ -844,6 +844,7 @@ order on the game's thread. What each line did is added to `sloperinaGZ/remote/o
 | `get <menu path>` | The item's value. |
 | `list [<menu path>]` | A menu's items: number, kind, name and value. Without a path, the top menu. |
 | `open [<menu path>]` | Opens the menu on the screen at that menu, or at that item of its menu with the cursor on it (without a path, the top menu): for a look at it, or a screenshot. |
+| `menu` | What the menu on screen shows: `menu closed`, or `menu open path=[<menu path>] cursor=@<item number> kind=<its kind> editing=<0\|1> line=[<its line>]`. For a tool that presses the menu's own buttons and wants to know where they took it. |
 | `wait <frames>` | The next line runs that many frames later. |
 | `repeat <n>` ... `end` | Runs the lines between that many times (up to four inside one another): with `wait` and `input`, a sequence of any length. |
 | `wait until <condition> [max <frames>]` | The next line runs once the condition holds (see below); an error after `max` frames (1,800 unless said), Held frames don't count: held by frame advance's buttons it waits on, and goes on when the game runs; held by the script's own `pause` or `step` (nothing else would let it go) it ends with an error (`talk`, `choose` and `place` too). |

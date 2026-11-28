@@ -286,6 +286,7 @@ bool pausemgr_set_masks(uint32_t id, const uint32_t masks[3], uint32_t was[3]) {
 bool physdump_write(const char *name, int *records, int64_t *bytes) { return (void)name, (void)records, (void)bytes, false; }
 bool pouch_button(int slot, const char *choice, uint32_t *was) { return (void)slot, (void)choice, (void)was, false; }
 bool pouch_equip_shield_now(const char *item) { return (void)item, false; }
+void menu_item_line(menu_item_t *it, char *buf, int len) { snprintf(buf, len, "%s", it->label ? it->label : ""); }
 
 void menu_close(void)
 {
@@ -892,6 +893,16 @@ int main(void)
   test_event = 0;
   frame(); /* the game runs again */
 
+  /* menu: closed, or where the menu on screen is and the item under the cursor */
+  menu_current = 0;
+  run_script("menu\n");
+  out_has(" 1 ok menu closed\n");
+  m_cheats.selected = 2;
+  menu_current = &m_cheats;
+  run_script("menu\n");
+  out_has(" 1 ok menu open path=[cheats] cursor=@2 kind=number editing=0 line=[rupees]\n");
+  menu_current = 0;
+  m_cheats.selected = 0;
 
   /* str: read, set, empty */
   run_script("str Sequence_CurrentBanc\nstr Sequence_CurrentBanc Market_Child\nstr X -\nstr X KokiriForest\n");
